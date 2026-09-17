@@ -460,13 +460,17 @@ customElements.define('family-overview-card', FamilyOverviewCard);
 
 /* ---------- Editor: family-overview-card (repeating Kind-Zeilen) ---------- */
 class FamilyOverviewCardEditor extends HTMLElement {
-  constructor() { super(); this._rendered = false; }
+  constructor() { super(); this._rendered = false; this._rowRefs = []; }
   setConfig(config) {
-    this._config = Object.assign({}, config, {
-      people: (config.people || []).map((p) => Object.assign({}, p)),
-    });
-    if (this._rendered) this._renderRows();
-    else if (this._hass) this._render();
+    const newPeople = (config.people || []).map((p) => Object.assign({}, p));
+    const oldLen = this._config && this._config.people ? this._config.people.length : -1;
+    this._config = Object.assign({}, config, { people: newPeople });
+    if (this._rendered) {
+      if (newPeople.length !== oldLen) this._renderRows();
+      else this._syncRows();
+    } else if (this._hass) {
+      this._render();
+    }
   }
   set hass(hass) {
     this._hass = hass;
@@ -499,9 +503,19 @@ class FamilyOverviewCardEditor extends HTMLElement {
     });
     this._renderRows();
   }
+  _syncRows() {
+    (this._config.people || []).forEach((person, idx) => {
+      const refs = this._rowRefs[idx];
+      if (!refs) return;
+      if (document.activeElement !== refs.nameEl) refs.nameEl.value = person.name || '';
+      if (refs.picker.value !== (person.entity || '')) refs.picker.value = person.entity || '';
+      if (document.activeElement !== refs.colorEl) refs.colorEl.value = person.color || '#4fa8e0';
+    });
+  }
   _renderRows() {
     const container = this.querySelector('#rows');
     container.innerHTML = '';
+    this._rowRefs = [];
     (this._config.people || []).forEach((person, idx) => {
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;gap:8px;align-items:center;border:1px solid var(--divider-color);border-radius:8px;padding:8px;';
@@ -550,6 +564,7 @@ class FamilyOverviewCardEditor extends HTMLElement {
 
       row.append(nameEl, picker, colorEl, removeBtn);
       container.appendChild(row);
+      this._rowRefs.push({ nameEl, picker, colorEl });
     });
   }
   _fireChanged() { fscFireConfigChanged(this, this._config); }
