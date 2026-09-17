@@ -243,14 +243,16 @@ class FamilySingleEntityEditorBase extends HTMLElement {
   setConfig(config) {
     this._config = Object.assign({}, config);
     if (this._rendered) this._syncFields();
+    else if (this._hass) this._render();
   }
   set hass(hass) {
     this._hass = hass;
     const picker = this.querySelector('ha-entity-picker');
     if (picker) picker.hass = hass;
-    if (!this._rendered) this._render();
+    if (!this._rendered && this._config) this._render();
   }
   _render() {
+    if (!this._config) return;
     this._rendered = true;
     this.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px;">
@@ -290,7 +292,7 @@ class FamilySingleEntityEditorBase extends HTMLElement {
   }
   _renderExtra() {}
   _syncFields() {
-    if (!this._rendered) return;
+    if (!this._rendered || !this._config) return;
     const titleEl = this.querySelector('#title');
     if (titleEl && document.activeElement !== titleEl) titleEl.value = this._config.title || '';
     const picker = this.querySelector('ha-entity-picker');
@@ -458,13 +460,15 @@ class FamilyOverviewCardEditor extends HTMLElement {
       people: (config.people || []).map((p) => Object.assign({}, p)),
     });
     if (this._rendered) this._renderRows();
+    else if (this._hass) this._render();
   }
   set hass(hass) {
     this._hass = hass;
-    if (!this._rendered) { this._render(); return; }
+    if (!this._rendered) { if (this._config) this._render(); return; }
     this.querySelectorAll('ha-entity-picker').forEach((p) => { p.hass = hass; });
   }
   _render() {
+    if (!this._config) return;
     this._rendered = true;
     this.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px;">
