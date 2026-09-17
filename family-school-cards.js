@@ -3,14 +3,16 @@
  * Lovelace-Karten für Schul-Stundenpläne (WebUntis-Kalender in Home Assistant)
  * https://github.com/jot-koehler/family-school-cards
  *
- * Enthält drei Karten:
+ * Enthält vier Karten:
  *   - family-timetable-card   Zeitraster-Stundenplan (heute/morgen) fuer EIN Kind
  *   - family-overview-card    Kompakte "Wer muss wann los"-Uebersicht fuer MEHRERE Kinder
  *   - family-homework-card    Direkt lesbare Hausaufgabenliste fuer EIN Kind
+ *   - family-exam-card        Farbcodierte Klassenarbeitenliste fuer EIN oder MEHRERE Kinder
  *
  * Voraussetzung: die Integration "WebUntis" (JonasJoKuJonas/homeassistant-WebUntis)
- * liefert pro Kind eine calendar.*-Entity. Siehe README.md fuer die noetige
- * WebUntis-Konfiguration (entfallene Stunden, Sonderveranstaltungen).
+ * liefert pro Kind eine calendar.*-Entity (Stundenplan), sowie *_hausaufgaben und
+ * *_pruefungen. Siehe README.md fuer die noetige WebUntis-Konfiguration (entfallene
+ * Stunden, Sonderveranstaltungen).
  * ========================================================================= */
 
 /* ---------- Gemeinsame Hilfsfunktionen ---------- */
@@ -708,6 +710,259 @@ class FamilyHomeworkCardEditor extends FamilySingleEntityEditorBase {
 }
 customElements.define('family-homework-card-editor', FamilyHomeworkCardEditor);
 
+/* =========================================================================
+ * family-exam-card
+ * Direkt lesbare Klassenarbeitenliste fuer EIN oder MEHRERE Kinder, farbcodiert
+ * pro Kind (wie family-overview-card: eine "people"-Liste aus Name/Kalender/
+ * Farbe statt einer einzelnen Kalender-Entity). Alle gewaehlten Kalender werden
+ * chronologisch zu einer gemeinsamen Liste gemischt; "max_items" begrenzt die
+ * GESAMTliste (nicht pro Kind) - so entscheidet die Auswahl der Kalender, ob die
+ * Karte eine uebersichtliche Familienliste oder die Arbeiten eines einzelnen
+ * Kindes zeigt.
+ * ========================================================================= */
+class FamilyExamCard extends HTMLElement {
+  static getConfigElement() {
+    return document.createElement('family-exam-card-editor');
+  }
+  static getStubConfig() {
+    return { title: 'Klassenarbeiten', people: [], days: 60, max_items: 5 };
+  }
+  setConfig(config) {
+    if (!config.people || !config.people.length) {
+      throw new Error('family-exam-card: "people" (mind. 1 Kalender-Entity) ist erforderlich.');
+    }
+    this._config = Object.assign({ days: 60, max_items: 5, refresh_interval: 300 }, config);
+    this._initialized = false;
+    this._render();
+  }
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._initialized) {
+      this._initialized = true;
+      this._fetchAndRender();
+      this._interval = setInterval(() => this._fetchAndRender(), this._config.refresh_interval * 1000);
+    }
+  }
+  disconnectedCallback() { if (this._interval) { clearInterval(this._interval); this._interval = null; } this._initialized = false; }
+  getCardSize() { return 4; }
+  async _fetchAndRender() {
+    if (!this._hass) return;
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    const end = new Date(start); end.setDate(end.getDate() + this._config.days);
+    const startISO = start.toISOString(); const endISO = end.toISOString();
+    let hadError = false;
+    const perPerson = await Promise.all(this._config.people.map(async (p) => {
+      try {
+        const events = await this._hass.callApi('GET', `calendars/${p.entity}?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`);
+        return { person: p, events: events || [] };
+      } catch (e) { console.error('family-exam-card:', p.entity, e); hadError = true; return { person: p, events: [] }; }
+    }));
+    const items = [];
+    const seen = new Set();
+    for (const { person, events } of perPerson) {
+      for (const ev of events) {
+        const startStr = ev.start && (ev.start.date || ev.start.dateTime);
+        const endStr = ev.end && (ev.end.date || ev.end.dateTime);
+        if (!startStr) continue;
+        const key = person.entity + '|' + startStr + '|' + endStr + '|' + (ev.summary || '');
+        if (seen.has(key)) continue; seen.add(key);
+        const given = ev.start.date ? new Date(ev.start.date + 'T00:00:00') : new Date(startStr);
+        let due;
+        if (ev.end && ev.end.date) {
+          due = new Date(ev.end.date + 'T00:00:00');
+          due.setDate(due.getDate() - 1);
+        } else if (endStr) {
+          due = new Date(endStr);
+        } else {
+          due = new Date(startStr);
+        }
+        items.push({ person, summary: ev.summary || '', description: ev.description || '', given, due });
+      }
+    }
+    items.sort((a, b) => a.due - b.due);
+    this._items = items.slice(0, this._config.max_items);
+    this._lastError = hadError;
+    this._render();
+  }
+  _linkify(text) {
+    const esc = fscEsc(text);
+    return esc.replace(/(https?:\/\/[^\s]+)/gi, (m) => `<a href="${m}" target="_blank" rel="noopener noreferrer">${m}</a>`);
+  }
+  _render() {
+    if (!this._config) return;
+    const items = this._items || [];
+    const dateFmt = new Intl.DateTimeFormat('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
+    const rows = items.length === 0
+      ? '<div class="empty"><ha-icon icon="mdi:check"></ha-icon>Keine Klassenarbeiten</div>'
+      : items.map((it) => {
+          const range = fscSameDay(it.given, it.due)
+            ? fscEsc(dateFmt.format(it.due))
+            : `${fscEsc(dateFmt.format(it.given))} – ${fscEsc(dateFmt.format(it.due))}`;
+          const desc = it.description
+            ? `<div class="desc">${this._linkify(it.description).replace(/\n/g, '<br>')}</div>`
+            : '';
+          const chipBg = fscHexToRgba(it.person.color || '#4fa8e0', 0.18);
+          const chipColor = it.person.color || '#4fa8e0';
+          return `<div class="item">
+                    <div class="item-head">
+                      <span class="range">${range}</span>
+                      <span class="person" style="background:${chipBg};color:${chipColor}">${fscEsc(it.person.name)}</span>
+                      <span class="subj">${fscEsc(it.summary)}</span>
+                    </div>
+                    ${desc}
+                  </div>`;
+        }).join('');
+    this.innerHTML = `<ha-card>${this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : ''}<style>
+      ha-card{padding:12px 16px;border:2px solid var(--divider-color)}
+      .title{font-size:1.2em;font-weight:500;margin-bottom:8px;color:var(--primary-text-color)}
+      .item{border-top:1px solid var(--divider-color);padding:9px 2px}
+      .item:first-child{border-top:none;padding-top:0}
+      .item-head{display:flex;align-items:baseline;gap:8px;margin-bottom:4px;flex-wrap:wrap}
+      .range{font-size:14px;font-weight:500;color:var(--primary-text-color)}
+      .person{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:2px 7px;border-radius:10px}
+      .subj{font-size:14px;font-weight:500;color:var(--primary-text-color)}
+      .desc{font-size:13px;line-height:1.45;color:var(--primary-text-color);white-space:pre-wrap;user-select:text;-webkit-user-select:text}
+      .desc a{color:var(--primary-color)}
+      .empty{display:flex;align-items:center;gap:6px;padding:6px 2px;font-size:13px;color:var(--secondary-text-color)}
+      .err{margin-top:8px;font-size:11px;color:var(--error-color,#db4437)}
+      </style><div class="list">${rows}</div>${this._lastError ? '<div class="err">Kalenderdaten konnten nicht vollständig geladen werden.</div>' : ''}</ha-card>`;
+  }
+}
+customElements.define('family-exam-card', FamilyExamCard);
+
+/* ---------- Editor: family-exam-card (repeating Kind-Zeilen, wie family-overview-card-editor) ---------- */
+class FamilyExamCardEditor extends HTMLElement {
+  constructor() { super(); this._rendered = false; this._rowRefs = []; }
+  setConfig(config) {
+    const newPeople = (config.people || []).map((p) => Object.assign({}, p));
+    const oldLen = this._config && this._config.people ? this._config.people.length : -1;
+    this._config = Object.assign({}, config, { people: newPeople });
+    if (this._rendered) {
+      if (newPeople.length !== oldLen) this._renderRows();
+      else this._syncRows();
+    } else if (this._hass) {
+      this._render();
+    }
+  }
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._rendered) { if (this._config) this._render(); return; }
+    this.querySelectorAll('ha-entity-picker').forEach((p) => { p.hass = hass; });
+  }
+  _render() {
+    if (!this._config) return;
+    this._rendered = true;
+    this.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px;">
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <label for="title" style="font-size:12px;color:var(--secondary-text-color);">Titel</label>
+          <input id="title" type="text" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+        </div>
+        <div style="display:flex;gap:16px;">
+          <div style="display:flex;flex-direction:column;gap:4px;flex:1;">
+            <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Vorschau-Zeitraum (Tage)</label>
+            <input id="days" type="number" min="1" max="180" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;flex:1;">
+            <label for="max_items" style="font-size:12px;color:var(--secondary-text-color);">Max. Eintraege</label>
+            <input id="max_items" type="number" min="1" max="50" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+          </div>
+        </div>
+        <div id="rows" style="display:flex;flex-direction:column;gap:8px;"></div>
+        <mwc-button id="add-row" raised>+ Kind hinzufügen</mwc-button>
+      </div>`;
+    const titleEl = this.querySelector('#title');
+    titleEl.value = this._config.title || '';
+    titleEl.addEventListener('input', () => { this._config.title = titleEl.value; this._fireChanged(); });
+    const daysEl = this.querySelector('#days');
+    daysEl.value = this._config.days != null ? this._config.days : 60;
+    daysEl.addEventListener('input', () => {
+      const v = parseInt(daysEl.value, 10);
+      this._config.days = isNaN(v) ? 60 : v;
+      this._fireChanged();
+    });
+    const maxEl = this.querySelector('#max_items');
+    maxEl.value = this._config.max_items != null ? this._config.max_items : 5;
+    maxEl.addEventListener('input', () => {
+      const v = parseInt(maxEl.value, 10);
+      this._config.max_items = isNaN(v) ? 5 : v;
+      this._fireChanged();
+    });
+    this.querySelector('#add-row').addEventListener('click', () => {
+      this._config.people = [...(this._config.people || []), { name: '', entity: '', color: '#4fa8e0' }];
+      this._renderRows();
+      this._fireChanged();
+    });
+    this._renderRows();
+  }
+  _syncRows() {
+    (this._config.people || []).forEach((person, idx) => {
+      const refs = this._rowRefs[idx];
+      if (!refs) return;
+      if (document.activeElement !== refs.nameEl) refs.nameEl.value = person.name || '';
+      if (refs.picker.value !== (person.entity || '')) refs.picker.value = person.entity || '';
+      if (document.activeElement !== refs.colorEl) refs.colorEl.value = person.color || '#4fa8e0';
+    });
+  }
+  _renderRows() {
+    const container = this.querySelector('#rows');
+    container.innerHTML = '';
+    this._rowRefs = [];
+    (this._config.people || []).forEach((person, idx) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;border:1px solid var(--divider-color);border-radius:8px;padding:8px;';
+
+      const nameEl = document.createElement('input');
+      nameEl.type = 'text';
+      nameEl.placeholder = 'Name';
+      nameEl.style.cssText = 'width:110px;box-sizing:border-box;padding:6px 8px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;';
+      nameEl.value = person.name || '';
+      nameEl.addEventListener('input', () => {
+        this._config.people[idx].name = nameEl.value;
+        this._fireChanged();
+      });
+
+      const picker = document.createElement('ha-entity-picker');
+      picker.includeDomains = ['calendar'];
+      picker.label = 'Kalender';
+      picker.hass = this._hass;
+      picker.value = person.entity || '';
+      picker.style.flex = '1';
+      picker.addEventListener('value-changed', (ev) => {
+        ev.stopPropagation();
+        this._config.people[idx].entity = ev.detail.value || '';
+        this._fireChanged();
+      });
+
+      const colorEl = document.createElement('input');
+      colorEl.type = 'color';
+      colorEl.value = person.color || '#4fa8e0';
+      colorEl.style.cssText = 'width:40px;height:32px;border:none;background:none;cursor:pointer;flex:none;';
+      colorEl.addEventListener('input', () => {
+        this._config.people[idx].color = colorEl.value;
+        this._fireChanged();
+      });
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = '✕';
+      removeBtn.title = 'Kind entfernen';
+      removeBtn.style.cssText = 'border:none;background:none;color:var(--error-color,#db4437);font-size:16px;cursor:pointer;padding:4px 8px;flex:none;';
+      removeBtn.addEventListener('click', () => {
+        this._config.people.splice(idx, 1);
+        this._renderRows();
+        this._fireChanged();
+      });
+
+      row.append(nameEl, picker, colorEl, removeBtn);
+      container.appendChild(row);
+      this._rowRefs.push({ nameEl, picker, colorEl });
+    });
+  }
+  _fireChanged() { fscFireConfigChanged(this, this._config); }
+}
+customElements.define('family-exam-card-editor', FamilyExamCardEditor);
+
 /* ---------- HACS / Lovelace Card-Picker Registrierung ---------- */
 window.customCards = window.customCards || [];
 window.customCards.push({
@@ -724,4 +979,9 @@ window.customCards.push({
   type: 'family-homework-card',
   name: 'Family Homework Card',
   description: 'Direkt lesbare WebUntis-Hausaufgabenliste, fuer ein Kind.',
+});
+window.customCards.push({
+  type: 'family-exam-card',
+  name: 'Family Exam Card',
+  description: 'Farbcodierte WebUntis-Klassenarbeitenliste fuer ein oder mehrere Kinder, max. N Eintraege waehlbar.',
 });
