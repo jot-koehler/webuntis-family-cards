@@ -256,7 +256,10 @@ class FamilySingleEntityEditorBase extends HTMLElement {
     this._rendered = true;
     this.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px;">
-        <ha-textfield id="title" label="Titel (z.B. Name des Kindes)" style="width:100%"></ha-textfield>
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <label for="title" style="font-size:12px;color:var(--secondary-text-color);">Titel (z.B. Name des Kindes)</label>
+          <input id="title" type="text" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+        </div>
         <div id="entity-slot"></div>
         <div style="display:flex;gap:12px;align-items:center;">
           <label style="font-size:14px;color:var(--secondary-text-color);min-width:70px;">Farbe</label>
@@ -306,7 +309,10 @@ class FamilySingleEntityEditorBase extends HTMLElement {
 class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
   _renderExtra() {
     const slot = this.querySelector('#extra-slot');
-    slot.innerHTML = `<ha-textfield id="days" label="Anzahl Tage (heute + folgende)" type="number" min="1" max="5" style="width:100%"></ha-textfield>`;
+    slot.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;">
+      <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Anzahl Tage (heute + folgende)</label>
+      <input id="days" type="number" min="1" max="5" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+    </div>`;
     const daysEl = slot.querySelector('#days');
     daysEl.addEventListener('input', () => {
       const v = parseInt(daysEl.value, 10);
@@ -472,7 +478,10 @@ class FamilyOverviewCardEditor extends HTMLElement {
     this._rendered = true;
     this.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px;">
-        <ha-textfield id="days" label="Anzahl Tage (heute + folgende)" type="number" min="1" max="5" style="width:220px"></ha-textfield>
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Anzahl Tage (heute + folgende)</label>
+          <input id="days" type="number" min="1" max="5" style="width:220px;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+        </div>
         <div id="rows" style="display:flex;flex-direction:column;gap:8px;"></div>
         <mwc-button id="add-row" raised>+ Kind hinzufügen</mwc-button>
       </div>`;
@@ -497,9 +506,10 @@ class FamilyOverviewCardEditor extends HTMLElement {
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;gap:8px;align-items:center;border:1px solid var(--divider-color);border-radius:8px;padding:8px;';
 
-      const nameEl = document.createElement('ha-textfield');
-      nameEl.label = 'Name';
-      nameEl.style.width = '110px';
+      const nameEl = document.createElement('input');
+      nameEl.type = 'text';
+      nameEl.placeholder = 'Name';
+      nameEl.style.cssText = 'width:110px;box-sizing:border-box;padding:6px 8px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;';
       nameEl.value = person.name || '';
       nameEl.addEventListener('input', () => {
         this._config.people[idx].name = nameEl.value;
@@ -664,7 +674,10 @@ customElements.define('family-homework-card', FamilyHomeworkCard);
 class FamilyHomeworkCardEditor extends FamilySingleEntityEditorBase {
   _renderExtra() {
     const slot = this.querySelector('#extra-slot');
-    slot.innerHTML = `<ha-textfield id="days" label="Vorschau-Zeitraum (Tage)" type="number" min="1" max="60" style="width:100%"></ha-textfield>`;
+    slot.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;">
+      <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Vorschau-Zeitraum (Tage)</label>
+      <input id="days" type="number" min="1" max="60" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+    </div>`;
     const daysEl = slot.querySelector('#days');
     daysEl.addEventListener('input', () => {
       const v = parseInt(daysEl.value, 10);
