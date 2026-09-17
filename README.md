@@ -26,6 +26,43 @@ Alle drei Karten haben einen visuellen Editor (Entity-Picker, Farbwähler,
 Textfelder) — YAML-Bearbeitung bleibt über "Als YAML bearbeiten" im
 Karten-Dialog weiterhin möglich.
 
+## family-exam-card
+
+Farbcodierte Klassenarbeiten-/Prüfungsliste für ein oder mehrere Kinder. Analog zu `family-homework-card`, aber mit einer `people`-Liste (wie bei `family-overview-card`) statt einer einzelnen Kalender-Entity: alle ausgewählten Kalender werden chronologisch zu **einer** Liste gemischt und farblich nach Kind gekennzeichnet. `max_items` begrenzt die Gesamtliste, nicht pro Kind — wer nur ein Kind einträgt, bekommt dessen nächste Arbeiten; wer mehrere einträgt, bekommt eine gemeinsame Übersicht.
+
+Voraussetzung: Die WebUntis-Integration muss für Prüfungen/Klassenarbeiten konfiguriert sein und liefert dafür eine eigene `calendar.*_pruefungen`-Entity pro Kind (parallel zur Stundenplan- und Hausaufgaben-Entity).
+
+### Konfiguration
+
+```yaml
+type: custom:family-exam-card
+title: Klassenarbeiten
+days: 60          # Vorschau-Zeitraum in Tagen (Default: 60)
+max_items: 5      # maximale Anzahl Einträge in der Gesamtliste (Default: 5)
+people:
+  - name: Anna
+    entity: calendar.anna_pruefungen
+    color: "#4fa8e0"
+  - name: Ben
+    entity: calendar.ben_pruefungen
+    color: "#ff9800"
+```
+
+Für die Ansicht eines einzelnen Kindes einfach nur einen Eintrag in `people` angeben.
+
+Wie bei den anderen Karten gibt es einen visuellen Card-Editor (Name, Kalender-Entity, Farbe pro Kind, plus Zeitraum und Max-Einträge), kein manuelles YAML nötig.
+
+### Optionen
+
+| Option | Typ | Default | Beschreibung |
+|---|---|---|---|
+| `title` | string | – | Kartentitel |
+| `people` | list | – (erforderlich) | Liste aus `{name, entity, color}` |
+| `days` | number | `60` | Wie viele Tage im Voraus abgefragt werden |
+| `max_items` | number | `5` | Maximale Anzahl Einträge in der zusammengeführten Liste |
+| `refresh_interval` | number | `300` | Aktualisierungsintervall in Sekunden |
+
+
 ---
 
 ## Voraussetzung: WebUntis-Integration
