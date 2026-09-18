@@ -1,18 +1,26 @@
 /* =========================================================================
  * Family School Cards
- * Lovelace-Karten für Schul-Stundenpläne (WebUntis-Kalender in Home Assistant)
- * https://github.com/jot-koehler/family-school-cards
+ * Kompakte Lovelace-Karten fuer Stundenplaene, Hausaufgaben und Klausuren von
+ * Kindern in Home Assistant.
+ * https://github.com/jot-koehler/webuntis-family-cards
  *
- * Enthält vier Karten:
- *   - family-timetable-card   Zeitraster-Stundenplan (heute/morgen) fuer EIN Kind
+ * Universell: die Karten arbeiten mit JEDER HA-Kalender-Entity (Google Calendar,
+ * CalDAV/iServ, ICS, lokaler Kalender ...). Entstanden fuer WebUntis
+ * (JonasJoKuJonas/homeassistant-WebUntis) - daher ist WebUntis die am besten
+ * unterstuetzte Quelle: nur dort liefert die Timetable-Karte zusaetzlich die
+ * Farb-/Statuskennung fuer entfallene Stunden, Vertretungen und
+ * Sonderveranstaltungen (Heuristik ueber die "Cancelled:"/"Irregular:"-Praefixe
+ * im summary-Feld). Mit anderen Kalendern werden Eintraege schlicht als normale
+ * Bloecke gezeigt - voll funktionsfaehig, nur ohne diese Hervorhebung.
+ *
+ * Enthaelt vier Karten:
+ *   - family-timetable-card   Zeitraster-Stundenplan (heute/folgende Tage) fuer EIN Kind,
+ *                             optional mit Klick-Detail-Popup und Mensa-Bestellhinweis
  *   - family-overview-card    Kompakte "Wer muss wann los"-Uebersicht fuer MEHRERE Kinder
- *   - family-homework-card    Direkt lesbare Hausaufgabenliste fuer EIN Kind
- *   - family-exam-card        Farbcodierte Klassenarbeitenliste fuer EIN oder MEHRERE Kinder
+ *   - family-homework-card    Hausaufgabenliste, farbcodiert je Kind (people) oder klassisch (entities)
+ *   - family-exam-card        Farbcodierte Klausurenliste fuer EIN oder MEHRERE Kinder
  *
- * Voraussetzung: die Integration "WebUntis" (JonasJoKuJonas/homeassistant-WebUntis)
- * liefert pro Kind eine calendar.*-Entity (Stundenplan), sowie *_hausaufgaben und
- * *_pruefungen. Siehe README.md fuer die noetige WebUntis-Konfiguration (entfallene
- * Stunden, Sonderveranstaltungen).
+ * Siehe README.md fuer die (fuer WebUntis) noetige Integrations-Konfiguration.
  * ========================================================================= */
 
 /* ---------- Gemeinsame Hilfsfunktionen ---------- */
@@ -54,6 +62,54 @@ function fscFireConfigChanged(el, config) {
   }));
 }
 
+/* Punkt 6: refresh_interval robust normalisieren.
+ * Nicht-numerische Werte, NaN, Infinity, negative Werte oder Werte < 30 s
+ * fallen auf den Default 300 zurueck, damit niemals ein extrem schnelles
+ * Interval an setInterval() gelangt. */
+function fscRefreshInterval(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 30 ? n : 300;
+}
+
+/* Punkt 10: nur valide Hex-Farben (#rgb oder #rrggbb) in HTML-/Style-Ausgaben
+ * zulassen; alles andere faellt auf die uebergebene Default-Farbe zurueck. */
+function fscSafeColor(color, fallback) {
+  const fb = fallback || '#4fa8e0';
+  const c = String(color || '').trim();
+  return /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(c) ? c : fb;
+}
+
+/* Punkt 8: prueft, ob eine Entity-ID wie eine Kalender-Entity aussieht.
+ * Kanonisches HA-Schema calendar.<slug> (slug: a-z, 0-9, _); interne Leerzeichen
+ * o. ae. werden abgelehnt, umschliessender Whitespace toleriert. */
+function fscIsCalendarEntity(id) {
+  return typeof id === 'string' && /^calendar\.[a-z0-9_]+$/i.test(id.trim());
+}
+
+/* Punkt 9: eine vorhandene calendar.*-Entity als Stub-Vorauswahl finden.
+ * opts.prefer  -> RegExp, es wird NUR eine fachlich passende Entity gewaehlt
+ *                 (Homework: Hausaufgaben, Exam: Pruefungen/Klausuren); passt keine,
+ *                 gibt es bewusst keine Vorauswahl (null) statt eines falschen Kalenders.
+ * opts.avoid   -> RegExp, es wird die erste Entity gewaehlt, die NICHT nach
+ *                 Hausaufgaben/Pruefungen/Klausuren aussieht; sind alle ausgeschlossen,
+ *                 gibt es keine Vorauswahl (null).
+ * Kein generischer ids[0]-Fallback mehr, der einen semantisch falschen Kalender liefert. */
+function fscPickCalendar(hass, opts) {
+  opts = opts || {};
+  if (!hass || !hass.states) return null;
+  const ids = Object.keys(hass.states).filter((id) => id.indexOf('calendar.') === 0);
+  if (!ids.length) return null;
+  if (opts.prefer) { return ids.find((id) => opts.prefer.test(id)) || null; }
+  if (opts.avoid) { return ids.find((id) => !opts.avoid.test(id)) || null; }
+  return ids[0];
+}
+
+/* Punkt 9: neutraler Platzhalter, wenn (noch) keine Kalender-Quelle konfiguriert
+ * ist. Bewusst mit Inline-Styles, damit kein zusaetzlicher Klassenname noetig ist. */
+function fscSourcePlaceholder() {
+  return '<ha-card style="padding:16px"><div style="font-size:13px;color:var(--secondary-text-color)">Bitte eine Kalender-Entity auswählen.</div></ha-card>';
+}
+
 /* =========================================================================
  * family-timetable-card
  * Zeitraster-Stundenplan (mehrere Tage auf gemeinsamer Zeitachse) fuer EIN Kind.
@@ -73,29 +129,178 @@ class FamilyTimetableCard extends HTMLElement {
   static getConfigElement() {
     return document.createElement('family-timetable-card-editor');
   }
-  static getStubConfig() {
-    return { title: '', entities: [], color: '#4fa8e0', days: 2 };
+  static getStubConfig(hass) {
+    const entity = fscPickCalendar(hass, { avoid: /(hausaufgab|pruef|pruf|klausur|exam)/i });
+    return { title: '', entities: entity ? [entity] : [], color: '#4fa8e0', days: 2 };
+  }
+  _resolveEntities() {
+    return (this._config.entities || [])
+      .map((e) => (typeof e === 'string' ? e : (e && e.entity)))
+      .filter((e) => typeof e === 'string' && e.trim());
   }
   setConfig(config) {
-    if (!config.entities || !config.entities.length) {
-      throw new Error('family-timetable-card: "entities" (mind. 1 Kalender-Entity) ist erforderlich.');
-    }
+    this._stopRefreshTimer();
+    this._reqSeq = (this._reqSeq || 0) + 1;
     this._config = Object.assign({
       days: 2, skip_weekends: true, refresh_interval: 300, pixels_per_hour: 70,
       padding_minutes: 15, fallback_day_start: '07:30', fallback_day_end: '14:00', color: '#4fa8e0',
+      afternoon_threshold: '13:00', // Feature Mensa: ab wann Nachmittagsunterricht = Essensbedarf
     }, config);
+    this._config.refresh_interval = fscRefreshInterval(this._config.refresh_interval);
+    this._noSource = this._resolveEntities().length === 0;
     this._initialized = false;
     this._render();
   }
   set hass(hass) {
+    const oldHass = this._hass;
     this._hass = hass;
     if (!this._initialized) {
       this._initialized = true;
       this._fetchAndRender();
       this._interval = setInterval(() => this._fetchAndRender(), this._config.refresh_interval * 1000);
+      this._startNowTicker();
+      return;
+    }
+    // Punkt 3: bei Aenderung eines konfigurierten Mensa-Sensors NUR neu rendern (kein neuer
+    // Kalender-Request, kein Timer-Neustart, kein Render bei irrelevanten State-Aenderungen).
+    if (this._config && this._config.show_mensa && Array.isArray(this._config.mensa_entities)) {
+      const changed = this._config.mensa_entities.some((entityId) => {
+        if (!entityId) return false;
+        const oldSt = oldHass && oldHass.states ? oldHass.states[entityId] : undefined;
+        const newSt = hass && hass.states ? hass.states[entityId] : undefined;
+        return (oldSt && oldSt.state) !== (newSt && newSt.state);
+      });
+      if (changed) this._render();
     }
   }
-  disconnectedCallback() { if (this._interval) { clearInterval(this._interval); this._interval = null; } this._initialized = false; }
+  _stopRefreshTimer() {
+    if (this._interval) { clearInterval(this._interval); this._interval = null; }
+    if (this._nowTimer) { clearInterval(this._nowTimer); this._nowTimer = null; }
+  }
+  _startNowTicker() {
+    // "Jetzt"-Linie unabhaengig vom (schweren) Kalender-Refresh aktuell halten: leichtes
+    // Neu-Rendern aus dem Cache (kein API-Aufruf), nur wenn die Karte sichtbar ist.
+    if (!this._nowTimer) {
+      this._nowTimer = setInterval(() => {
+        if (document.visibilityState === 'visible' && this._initialized) this._render();
+      }, 60000);
+    }
+  }
+  connectedCallback() {
+    if (!this._onVisible) {
+      // Sofortiges Update, sobald die Karte wieder sichtbar wird (Tablet/Tab aus dem
+      // Hintergrund) - dort drosseln/pausieren Browser die Timer, sonst bleibt die
+      // "Jetzt"-Linie eingefroren. Bei ueberfaelligen Daten neu laden, sonst nur rendern.
+      this._onVisible = () => {
+        if (document.visibilityState !== 'visible' || !this._hass || !this._initialized) return;
+        const age = Date.now() - (this._lastFetch || 0);
+        if (age >= this._config.refresh_interval * 1000) this._fetchAndRender();
+        else this._render();
+      };
+      document.addEventListener('visibilitychange', this._onVisible);
+    }
+    if (this._clickBound) return;
+    this._clickBound = true;
+    // Feature: Klick auf einen Eintrag -> Detail-Popup. Delegation am Host, damit der
+    // Listener ueber die innerHTML-Neuaufbauten hinweg bestehen bleibt (einmalig gebunden).
+    this.addEventListener('click', (ev) => {
+      const el = ev.target && ev.target.closest ? ev.target.closest('.event') : null;
+      if (!el || !this.contains(el)) return;
+      const di = Number(el.getAttribute('data-di'));
+      const ii = Number(el.getAttribute('data-ii'));
+      const bucket = this._buckets && this._buckets[di];
+      const item = bucket && bucket.items && bucket.items[ii];
+      if (item) this._openDetail(item);
+    });
+  }
+  disconnectedCallback() {
+    this._stopRefreshTimer();
+    if (this._onVisible) { document.removeEventListener('visibilitychange', this._onVisible); this._onVisible = null; }
+    this._reqSeq = (this._reqSeq || 0) + 1;
+    this._initialized = false;
+    if (this._dialog) { this._dialog.open = false; this._dialog.remove(); this._dialog = null; }
+  }
+  _openDetail(item) {
+    if (!this._dialog) {
+      this._dialog = document.createElement('ha-dialog');
+      this._dialog.addEventListener('closed', () => { if (this._dialog) this._dialog.open = false; });
+      document.body.appendChild(this._dialog);
+    }
+    const dateFmt = new Intl.DateTimeFormat('de-DE', { weekday: 'long', day: 'numeric', month: 'long' });
+    const timeFmt = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' });
+    const title = item.title || 'Termin';
+    const statusLabel = item.cancelled ? 'Entfallen' : (item.special ? 'Sonderveranstaltung' : (item.changed ? 'Änderung / Vertretung' : ''));
+    const statusCls = item.cancelled ? 'cancelled' : (item.special ? 'special' : (item.changed ? 'changed' : ''));
+    const statusHtml = statusLabel ? `<div class="fsc-dlg-badge ${statusCls}">${fscEsc(statusLabel)}</div>` : '';
+    const roomHtml = item.location ? `<div class="fsc-dlg-row"><ha-icon icon="mdi:map-marker-outline"></ha-icon>${fscEsc(item.location)}</div>` : '';
+    const descHtml = item.description ? `<div class="fsc-dlg-desc">${fscEsc(item.description).replace(/\n/g, '<br>')}</div>` : '';
+    // Punkt 2 (korrigiert): Titel NUR ueber die vom Dialog tatsaechlich unterstuetzte Header-API
+    // setzen, damit er nicht doppelt (nativer Header + Body) erscheint. headerTitle ab HA 2026.3
+    // (Web-Awesome-Dialog), heading in aelteren Generationen. Body-Titel nur als Fallback, wenn
+    // KEINE Header-API existiert.
+    const hasHeaderTitle = ('headerTitle' in this._dialog);
+    const hasHeading = ('heading' in this._dialog);
+    let fallbackTitleHtml = '';
+    if (hasHeaderTitle) { this._dialog.headerTitle = title; }
+    else if (hasHeading) { this._dialog.heading = title; }
+    else { fallbackTitleHtml = `<div class="fsc-dlg-title">${fscEsc(title)}</div>`; }
+    // Schliessen ueber einen eigenen Button mit explizitem open=false statt ueber einen
+    // HA-internen Action-Slot (primaryAction/dialogAction), der sich zwischen den
+    // Dialog-Generationen unterscheidet - so bleibt die Kernfunktion API-unabhaengig.
+    this._dialog.innerHTML = `
+      <style>
+        .fsc-dlg-title{font-size:18px;font-weight:600;color:var(--primary-text-color);margin-bottom:12px}
+        .fsc-dlg-row{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--primary-text-color);margin-bottom:8px}
+        .fsc-dlg-row ha-icon{--mdc-icon-size:18px;color:var(--secondary-text-color)}
+        .fsc-dlg-badge{display:inline-block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:3px 8px;border-radius:10px;margin-bottom:10px}
+        .fsc-dlg-badge.changed{background:rgba(224,168,79,0.18);color:#e0a84f}
+        .fsc-dlg-badge.cancelled{background:rgba(224,95,79,0.16);color:#e05f4f}
+        .fsc-dlg-badge.special{background:rgba(230,194,41,0.20);color:#c9a415}
+        .fsc-dlg-desc{font-size:13px;line-height:1.5;color:var(--primary-text-color);white-space:pre-wrap;margin-top:4px;padding-top:8px;border-top:1px solid var(--divider-color)}
+        .fsc-dlg-actions{display:flex;justify-content:flex-end;margin-top:14px}
+        .fsc-dlg-close{font:inherit;font-weight:600;color:var(--primary-color);background:none;border:none;padding:8px 12px;border-radius:6px;cursor:pointer}
+        .fsc-dlg-close:hover{background:rgba(var(--rgb-primary-color,79,168,224),0.12)}
+      </style>
+      <div style="padding:4px 4px 8px;min-width:240px;">
+        ${fallbackTitleHtml}
+        ${statusHtml}
+        <div class="fsc-dlg-row"><ha-icon icon="mdi:calendar-outline"></ha-icon>${fscEsc(dateFmt.format(item.start))}</div>
+        <div class="fsc-dlg-row"><ha-icon icon="mdi:clock-outline"></ha-icon>${timeFmt.format(item.start)}–${timeFmt.format(item.end)}</div>
+        ${roomHtml}
+        ${descHtml}
+        <div class="fsc-dlg-actions"><button type="button" class="fsc-dlg-close">Schließen</button></div>
+      </div>
+    `;
+    const closeBtn = this._dialog.querySelector('.fsc-dlg-close');
+    if (closeBtn) closeBtn.addEventListener('click', () => { this._dialog.open = false; });
+    this._dialog.open = true;
+  }
+  // Feature Mensa (optional): Hinweis pro Tag, wenn show_mensa aktiv und ein binary_sensor
+  // fuer diesen Tag konfiguriert ist. "an" = bestellt. Nur relevant, wenn an dem Tag
+  // Nachmittagsunterricht (>= afternoon_threshold) stattfindet.
+  _mensaHint(bucketIdx) {
+    if (!this._config.show_mensa) return null;
+    const entities = this._config.mensa_entities;
+    if (!Array.isArray(entities) || !entities[bucketIdx] || !this._hass) return null;
+    const st = this._hass.states[entities[bucketIdx]];
+    if (!st) return null;
+    // Punkt 4: nur bei belastbarem Zustand (on/off) urteilen - unknown/unavailable = kein Hinweis.
+    if (st.state !== 'on' && st.state !== 'off') return null;
+    const ordered = st.state === 'on';
+    const b = this._buckets && this._buckets[bucketIdx];
+    if (!b) return null;
+    // Punkt 5: afternoon_threshold als HH:MM validieren, sonst Default 13:00 (kein 00:00-Fehlwert).
+    const tm = /^(\d{1,2}):(\d{2})$/.exec(String(this._config.afternoon_threshold || '').trim());
+    let thresholdMin = 13 * 60;
+    if (tm) {
+      const ah = Number(tm[1]); const am = Number(tm[2]);
+      if (ah >= 0 && ah <= 23 && am >= 0 && am <= 59) thresholdMin = ah * 60 + am;
+    }
+    const hasAfternoon = b.items.some((it) => !it.cancelled && fscMinOfDay(it.start) >= thresholdMin);
+    if (hasAfternoon && !ordered) return { text: 'kein Essen bestellt', cls: 'warn' };
+    if (ordered && !hasAfternoon) return { text: 'Essen abbestellen?', cls: 'info' };
+    return null;
+  }
   getCardSize() { return 5; }
   _layoutColumns(items) {
     const n = items.length;
@@ -125,17 +330,26 @@ class FamilyTimetableCard extends HTMLElement {
   }
   async _fetchAndRender() {
     if (!this._hass) return;
+    const myReq = ++this._reqSeq;
+    const entities = this._resolveEntities();
+    if (!entities.length) {
+      this._noSource = true; this._buckets = null; this._hasAnyEvents = false; this._lastError = false; this._partialError = false;
+      this._lastFetch = Date.now();
+      this._render();
+      return;
+    }
+    this._noSource = false;
     const dates = fscDates(this._config.days, this._config.skip_weekends); if (!dates.length) return;
     const rangeStart = new Date(dates[0]); rangeStart.setHours(-6, 0, 0, 0);
     const rangeEnd = new Date(dates[dates.length - 1]); rangeEnd.setHours(30, 0, 0, 0);
     const startISO = rangeStart.toISOString(); const endISO = rangeEnd.toISOString();
-    const perEntity = await Promise.all(this._config.entities.map(async (ent) => {
-      const entityId = typeof ent === 'string' ? ent : ent.entity;
+    const perEntity = await Promise.all(entities.map(async (entityId) => {
       try {
         const events = await this._hass.callApi('GET', `calendars/${entityId}?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`);
         return { entityId, events: events || [] };
       } catch (e) { console.error('family-timetable-card:', entityId, e); return { entityId, events: [], error: true }; }
     }));
+    if (myReq !== this._reqSeq) return; // Punkt 2: veralteter Request (Config-Wechsel, Disconnect, ueberholter Refresh)
     const buckets = dates.map((d) => ({ date: d, items: [] }));
     const seen = new Set();
     for (const src of perEntity) {
@@ -151,8 +365,10 @@ class FamilyTimetableCard extends HTMLElement {
         if (m) { changed = true; title = title.slice(m[0].length); }
         m = title.match(/^Cancelled:\s*/i);
         if (m) { cancelled = true; title = title.slice(m[0].length); }
-        const special = changed && !ev.location;
-        bucket.items.push({ start, end, title, location: ev.location || '', changed, cancelled, special });
+        // Punkt 11: leere und reine Whitespace-Raumangaben gelten als "kein Raum".
+        const location = String(ev.location || '').trim();
+        const special = changed && !location;
+        bucket.items.push({ start, end, title, location, changed, cancelled, special, description: String(ev.description || '') });
       }
     }
     for (const b of buckets) b.items.sort((a, c) => a.start - c.start || a.end - c.end);
@@ -172,13 +388,56 @@ class FamilyTimetableCard extends HTMLElement {
     maxEnd = Math.min(24 * 60, Math.ceil((maxEnd + pad) / 5) * 5);
     this._buckets = buckets; this._hasAnyEvents = hasAnyEvents;
     this._dayStartMin = minStart; this._dayEndMin = maxEnd;
-    this._lastError = perEntity.some((p) => p.error);
+    // Punkt 7/3: nur bei ALLEN fehlgeschlagenen Quellen ein Vollfehler; bei Teilfehler
+    // erfolgreiche Daten anzeigen und separat warnen (analog family-exam-card).
+    const errCount = perEntity.filter((p) => p.error).length;
+    this._lastError = errCount > 0 && errCount === perEntity.length;
+    this._partialError = errCount > 0 && errCount < perEntity.length;
+    this._lastFetch = Date.now();
     this._render();
   }
   _render() {
     if (!this._config) return;
-    this.style.setProperty('--fsc-accent', this._config.color);
-    this.style.setProperty('--fsc-border', fscHexToRgba(this._config.color, 0.28));
+    if (this._noSource) { this.innerHTML = fscSourcePlaceholder(); return; }
+    const safeColor = fscSafeColor(this._config.color);
+    this.style.setProperty('--fsc-accent', safeColor);
+    this.style.setProperty('--fsc-border', fscHexToRgba(safeColor, 0.28));
+    const titleHtml = this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : '';
+    const style = `<style>
+      family-timetable-card ha-card{padding:16px 16px 12px;border:2px solid var(--fsc-border,var(--divider-color))}
+      family-timetable-card .title{font-size:1.5em;font-weight:500;margin-bottom:12px;color:var(--fsc-accent,var(--primary-text-color))}
+      family-timetable-card .grid{display:flex;gap:16px}
+      family-timetable-card .day-col{flex:1;min-width:0}
+      family-timetable-card .weekday{font-size:14px;color:var(--primary-text-color)}
+      family-timetable-card .date-row{font-size:13px;color:var(--secondary-text-color);margin-bottom:6px}
+      family-timetable-card .day-num{font-size:20px;font-weight:600;color:var(--primary-text-color)}
+      family-timetable-card .day-header{border-bottom:1px solid var(--divider-color);padding-bottom:6px;margin-bottom:8px}
+      family-timetable-card .mensa-slot{min-height:18px;margin-top:4px}
+      family-timetable-card .mensa-hint{display:block;font-size:11px;font-weight:700;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      family-timetable-card .mensa-hint.warn{color:#e05f4f}
+      family-timetable-card .mensa-hint.info{color:#e0a84f}
+      family-timetable-card .day-body{position:relative}
+      family-timetable-card .event{position:absolute;background:rgba(var(--rgb-primary-color,79,168,224),0.16);border-left:3px solid var(--fsc-accent,var(--primary-color));border-radius:6px;padding:5px 8px;box-sizing:border-box;overflow:hidden;cursor:pointer;-webkit-tap-highlight-color:transparent}
+      family-timetable-card .event.changed{border-left-color:#e0a84f;background:rgba(224,168,79,0.16)}
+      family-timetable-card .event.cancelled{border-left-color:#e05f4f;background:rgba(224,95,79,0.14)}
+      family-timetable-card .event.special{border-left-color:#e6c229;background:rgba(230,194,41,0.18)}
+      family-timetable-card .strike{text-decoration:line-through;opacity:.75}
+      family-timetable-card .event-title{font-size:13px;font-weight:500;color:var(--primary-text-color);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:4px}
+      family-timetable-card .chg-icon{--mdc-icon-size:14px;color:#e0a84f;flex:none}
+      family-timetable-card .cnl-icon{--mdc-icon-size:14px;color:#e05f4f;flex:none}
+      family-timetable-card .spc-icon{--mdc-icon-size:14px;color:#e6c229;flex:none}
+      family-timetable-card .event-time{font-size:11px;color:var(--secondary-text-color);display:flex;align-items:center;gap:3px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      family-timetable-card .event-time ha-icon{--mdc-icon-size:13px}
+      family-timetable-card .now-line{position:absolute;left:-4px;right:0;height:0;border-top:2px solid var(--error-color,#db4437);opacity:.55}
+      family-timetable-card .empty{display:flex;align-items:center;gap:6px;background:rgba(var(--rgb-primary-color,79,168,224),0.16);border-left:3px solid var(--fsc-accent,var(--primary-color));border-radius:6px;padding:8px 10px;font-size:13px;color:var(--secondary-text-color)}
+      family-timetable-card .empty ha-icon{--mdc-icon-size:16px;color:var(--secondary-text-color)}
+      family-timetable-card .err{margin-top:0;font-size:13px;color:var(--error-color,#db4437)}
+      </style>`;
+    // Punkt 7: bei einem fehlgeschlagenen Request keinen "keine Termine"-Zustand vortaeuschen.
+    if (this._lastError) {
+      this.innerHTML = `<ha-card>${titleHtml}${style}<div class="err">Stundenplan konnte nicht geladen werden.</div></ha-card>`;
+      return;
+    }
     const buckets = this._buckets || fscDates(this._config.days, this._config.skip_weekends).map((d) => ({ date: d, items: [] }));
     const showGrid = this._hasAnyEvents !== false;
     const dayStartMin = this._dayStartMin != null ? this._dayStartMin : 450;
@@ -190,8 +449,18 @@ class FamilyTimetableCard extends HTMLElement {
     const dayFmt = new Intl.DateTimeFormat('de-DE', { day: 'numeric' });
     const monthFmt = new Intl.DateTimeFormat('de-DE', { month: 'short' });
     const timeFmt = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' });
-    const dayCols = buckets.map((b) => {
+    // Feature Mensa: verschiebungsfrei - der Hinweis lebt in einem in JEDER Spalte
+    // reservierten Header-Slot (leer, wenn kein Hinweis), damit das Raster ausgerichtet bleibt.
+    const mensaActive = this._config.show_mensa && Array.isArray(this._config.mensa_entities);
+    const dayCols = buckets.map((b, di) => {
       const isToday = fscSameDay(b.date, now);
+      const hint = mensaActive ? this._mensaHint(di) : null;
+      const hintInner = hint
+        ? (this._config.mensa_link
+            ? `<a class="mensa-hint ${hint.cls}" href="${fscEsc(this._config.mensa_link)}" target="_blank" rel="noopener noreferrer">${fscEsc(hint.text)}</a>`
+            : `<span class="mensa-hint ${hint.cls}">${fscEsc(hint.text)}</span>`)
+        : '';
+      const mensaSlot = mensaActive ? `<div class="mensa-slot">${hintInner}</div>` : '';
       const bodyStyle = showGrid ? `height:${heightPx}px` : '';
       const layout = this._layoutColumns(b.items);
       const blocks = !showGrid ? '' : b.items.map((it, idx) => {
@@ -208,33 +477,15 @@ class FamilyTimetableCard extends HTMLElement {
         const meta = it.location ? `${timeLabel} · Raum ${it.location}` : timeLabel;
         const cls = it.cancelled ? 'event cancelled' : (it.special ? 'event special' : (it.changed ? 'event changed' : 'event'));
         const icon = it.cancelled ? '<ha-icon icon="mdi:cancel" class="cnl-icon"></ha-icon>' : (it.special ? '<ha-icon icon="mdi:calendar-star" class="spc-icon"></ha-icon>' : (it.changed ? '<ha-icon icon="mdi:sync-alert" class="chg-icon"></ha-icon>' : ''));
-        const titleHtml = it.cancelled ? `<span class="strike">${fscEsc(it.title)}</span>` : fscEsc(it.title);
-        return `<div class="${cls}" style="${posStyle}"><div class="event-title">${icon}${titleHtml}</div>${height > 7 && cols === 1 ? `<div class="event-time"><ha-icon icon="mdi:clock-outline"></ha-icon>${fscEsc(meta)}</div>` : ''}</div>`;
+        const evTitle = it.cancelled ? `<span class="strike">${fscEsc(it.title)}</span>` : fscEsc(it.title);
+        return `<div class="${cls}" style="${posStyle}" data-di="${di}" data-ii="${idx}"><div class="event-title">${icon}${evTitle}</div>${height > 7 && cols === 1 ? `<div class="event-time"><ha-icon icon="mdi:clock-outline"></ha-icon>${fscEsc(meta)}</div>` : ''}</div>`;
       }).join('');
       const nowLine = showGrid && isToday && nowMin >= dayStartMin && nowMin <= dayEndMin ? `<div class="now-line" style="top:${((nowMin - dayStartMin) / totalMin) * 100}%"></div>` : '';
       const empty = b.items.length === 0 ? '<div class="empty"><ha-icon icon="mdi:check"></ha-icon>Keine anstehenden Termine</div>' : '';
-      return `<div class="day-col"><div class="day-header"><div class="weekday">${fscEsc(weekdayFmt.format(b.date))}</div><div class="date-row"><span class="day-num">${dayFmt.format(b.date)}</span> <span class="month">${fscEsc(monthFmt.format(b.date).toUpperCase())}</span></div></div><div class="day-body" style="${bodyStyle}">${nowLine}${blocks}${empty}</div></div>`;
+      return `<div class="day-col"><div class="day-header"><div class="weekday">${fscEsc(weekdayFmt.format(b.date))}</div><div class="date-row"><span class="day-num">${dayFmt.format(b.date)}</span> <span class="month">${fscEsc(monthFmt.format(b.date).toUpperCase())}</span></div>${mensaSlot}</div><div class="day-body" style="${bodyStyle}">${nowLine}${blocks}${empty}</div></div>`;
     }).join('');
-    const errNote = this._lastError ? '<div class="err">Kalenderdaten konnten nicht vollständig geladen werden.</div>' : '';
-    this.innerHTML = `<ha-card>${this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : ''}<style>
-      ha-card{padding:16px 16px 12px;border:2px solid var(--fsc-border,var(--divider-color))}
-      .title{font-size:1.5em;font-weight:500;margin-bottom:12px;color:var(--fsc-accent,var(--primary-text-color))}
-      .grid{display:flex;gap:16px}.day-col{flex:1;min-width:0}.weekday{font-size:14px;color:var(--primary-text-color)}
-      .date-row{font-size:13px;color:var(--secondary-text-color);margin-bottom:6px}.day-num{font-size:20px;font-weight:600;color:var(--primary-text-color)}
-      .day-header{border-bottom:1px solid var(--divider-color);padding-bottom:6px;margin-bottom:8px}.day-body{position:relative}
-      .event{position:absolute;background:rgba(var(--rgb-primary-color,79,168,224),0.16);border-left:3px solid var(--fsc-accent,var(--primary-color));border-radius:6px;padding:5px 8px;box-sizing:border-box;overflow:hidden}
-      .event.changed{border-left-color:#e0a84f;background:rgba(224,168,79,0.16)}
-      .event.cancelled{border-left-color:#e05f4f;background:rgba(224,95,79,0.14)}
-      .event.special{border-left-color:#e6c229;background:rgba(230,194,41,0.18)}
-      .strike{text-decoration:line-through;opacity:.75}
-      .event-title{font-size:13px;font-weight:500;color:var(--primary-text-color);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:4px}
-      .chg-icon{--mdc-icon-size:14px;color:#e0a84f;flex:none}.cnl-icon{--mdc-icon-size:14px;color:#e05f4f;flex:none}.spc-icon{--mdc-icon-size:14px;color:#e6c229;flex:none}
-      .event-time{font-size:11px;color:var(--secondary-text-color);display:flex;align-items:center;gap:3px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .event-time ha-icon{--mdc-icon-size:13px}
-      .now-line{position:absolute;left:-4px;right:0;height:0;border-top:2px solid var(--error-color,#db4437);opacity:.55}
-      .empty{display:flex;align-items:center;gap:6px;background:rgba(var(--rgb-primary-color,79,168,224),0.16);border-left:3px solid var(--fsc-accent,var(--primary-color));border-radius:6px;padding:8px 10px;font-size:13px;color:var(--secondary-text-color)}
-      .empty ha-icon{--mdc-icon-size:16px;color:var(--secondary-text-color)}.err{margin-top:8px;font-size:11px;color:var(--error-color,#db4437)}
-      </style><div class="grid">${dayCols}</div>${errNote}</ha-card>`;
+    const partialErr = this._partialError ? '<div class="err">Einige Kalender konnten nicht geladen werden.</div>' : '';
+    this.innerHTML = `<ha-card>${titleHtml}${style}<div class="grid">${dayCols}</div>${partialErr}</ha-card>`;
   }
 }
 customElements.define('family-timetable-card', FamilyTimetableCard);
@@ -309,23 +560,106 @@ class FamilySingleEntityEditorBase extends HTMLElement {
 }
 
 class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
+  // Mehrere Picker (Kalender + Mensa-Sensoren) mit hass versorgen.
+  set hass(hass) {
+    this._hass = hass;
+    this.querySelectorAll('ha-entity-picker').forEach((p) => { p.hass = hass; });
+    if (!this._rendered && this._config) this._render();
+  }
   _renderExtra() {
     const slot = this.querySelector('#extra-slot');
-    slot.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;">
-      <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Anzahl Tage (heute + folgende)</label>
-      <input id="days" type="number" min="1" max="5" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
-    </div>`;
+    slot.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:4px;">
+        <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Anzahl Tage (heute + folgende)</label>
+        <input id="days" type="number" min="1" max="5" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--divider-color);padding-top:12px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--primary-text-color);cursor:pointer;">
+          <input id="show_mensa" type="checkbox"> Mensa-Hinweis anzeigen
+        </label>
+        <div id="mensa-cfg" style="display:none;flex-direction:column;gap:10px;">
+          <div style="font-size:11px;color:var(--secondary-text-color);">Ein binary_sensor pro angezeigtem Tag (an = bestellt), in Tagesreihenfolge.</div>
+          <div id="mensa-rows" style="display:flex;flex-direction:column;gap:6px;"></div>
+          <mwc-button id="mensa-add" dense>+ Tag/Sensor</mwc-button>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <label for="mensa_link" style="font-size:12px;color:var(--secondary-text-color);">Bestell-Link (optional)</label>
+            <input id="mensa_link" type="text" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <label for="afternoon_threshold" style="font-size:12px;color:var(--secondary-text-color);">Nachmittagsschwelle (ab dieser Uhrzeit gilt Essensbedarf)</label>
+            <input id="afternoon_threshold" type="time" style="width:150px;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+          </div>
+        </div>
+      </div>`;
     const daysEl = slot.querySelector('#days');
     daysEl.addEventListener('input', () => {
       const v = parseInt(daysEl.value, 10);
       this._config.days = isNaN(v) ? 2 : v;
       this._fireChanged();
     });
+    const showEl = slot.querySelector('#show_mensa');
+    showEl.addEventListener('change', () => {
+      this._config.show_mensa = showEl.checked;
+      slot.querySelector('#mensa-cfg').style.display = showEl.checked ? 'flex' : 'none';
+      this._fireChanged();
+    });
+    slot.querySelector('#mensa-add').addEventListener('click', () => {
+      this._config.mensa_entities = [...(this._config.mensa_entities || []), ''];
+      this._renderMensaRows();
+      this._fireChanged();
+    });
+    const linkEl = slot.querySelector('#mensa_link');
+    linkEl.addEventListener('input', () => { this._config.mensa_link = linkEl.value; this._fireChanged(); });
+    const thrEl = slot.querySelector('#afternoon_threshold');
+    thrEl.addEventListener('input', () => { this._config.afternoon_threshold = thrEl.value || '13:00'; this._fireChanged(); });
+    this._renderMensaRows();
+  }
+  _renderMensaRows() {
+    const container = this.querySelector('#mensa-rows');
+    if (!container) return;
+    container.innerHTML = '';
+    (this._config.mensa_entities || []).forEach((entId, idx) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;';
+      const picker = document.createElement('ha-entity-picker');
+      picker.includeDomains = ['binary_sensor'];
+      picker.label = `Tag ${idx + 1}`;
+      picker.hass = this._hass;
+      picker.value = entId || '';
+      picker.style.flex = '1';
+      picker.addEventListener('value-changed', (ev) => {
+        ev.stopPropagation();
+        this._config.mensa_entities[idx] = ev.detail.value || '';
+        this._fireChanged();
+      });
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = '✕';
+      removeBtn.title = 'Tag entfernen';
+      removeBtn.style.cssText = 'border:none;background:none;color:var(--error-color,#db4437);font-size:16px;cursor:pointer;padding:4px 8px;flex:none;';
+      removeBtn.addEventListener('click', () => {
+        this._config.mensa_entities.splice(idx, 1);
+        this._renderMensaRows();
+        this._fireChanged();
+      });
+      row.append(picker, removeBtn);
+      container.appendChild(row);
+    });
   }
   _syncFields() {
     super._syncFields();
     const daysEl = this.querySelector('#days');
     if (daysEl && document.activeElement !== daysEl) daysEl.value = this._config.days != null ? this._config.days : 2;
+    const showEl = this.querySelector('#show_mensa');
+    if (showEl) {
+      showEl.checked = !!this._config.show_mensa;
+      const cfg = this.querySelector('#mensa-cfg');
+      if (cfg) cfg.style.display = showEl.checked ? 'flex' : 'none';
+    }
+    const linkEl = this.querySelector('#mensa_link');
+    if (linkEl && document.activeElement !== linkEl) linkEl.value = this._config.mensa_link || '';
+    const thrEl = this.querySelector('#afternoon_threshold');
+    if (thrEl && document.activeElement !== thrEl) thrEl.value = this._config.afternoon_threshold || '13:00';
   }
 }
 customElements.define('family-timetable-card-editor', FamilyTimetableCardEditor);
@@ -338,17 +672,22 @@ class FamilyOverviewCard extends HTMLElement {
   static getConfigElement() {
     return document.createElement('family-overview-card-editor');
   }
-  static getStubConfig() {
-    return { days: 2, people: [] };
+  static getStubConfig(hass) {
+    const entity = fscPickCalendar(hass, { avoid: /(hausaufgab|pruef|pruf|klausur|exam)/i });
+    return { days: 2, people: entity ? [{ name: '', entity, color: '#4fa8e0' }] : [] };
+  }
+  _resolvePeople() {
+    return (this._config.people || []).filter((p) => p && fscIsCalendarEntity(p.entity));
   }
   setConfig(config) {
-    if (!config.people || !config.people.length) {
-      throw new Error('family-overview-card: "people" (mind. 1 Kind) ist erforderlich.');
-    }
+    this._stopRefreshTimer();
+    this._reqSeq = (this._reqSeq || 0) + 1;
     this._config = Object.assign({
       days: 2, skip_weekends: true, refresh_interval: 300,
       padding_minutes: 15, fallback_day_start: '07:30', fallback_day_end: '14:00',
     }, config);
+    this._config.refresh_interval = fscRefreshInterval(this._config.refresh_interval);
+    this._noSource = this._resolvePeople().length === 0;
     this._initialized = false;
     this._render();
   }
@@ -358,22 +697,65 @@ class FamilyOverviewCard extends HTMLElement {
       this._initialized = true;
       this._fetchAndRender();
       this._interval = setInterval(() => this._fetchAndRender(), this._config.refresh_interval * 1000);
+      this._startNowTicker();
     }
   }
-  disconnectedCallback() { if (this._interval) { clearInterval(this._interval); this._interval = null; } this._initialized = false; }
+  _stopRefreshTimer() {
+    if (this._interval) { clearInterval(this._interval); this._interval = null; }
+    if (this._nowTimer) { clearInterval(this._nowTimer); this._nowTimer = null; }
+  }
+  _startNowTicker() {
+    // "Jetzt"-Markierung unabhaengig vom (schweren) Kalender-Refresh aktuell halten: leichtes
+    // Neu-Rendern aus dem Cache (kein API-Aufruf), nur wenn die Karte sichtbar ist.
+    if (!this._nowTimer) {
+      this._nowTimer = setInterval(() => {
+        if (document.visibilityState === 'visible' && this._initialized) this._render();
+      }, 60000);
+    }
+  }
+  connectedCallback() {
+    if (!this._onVisible) {
+      // Sofortiges Update, sobald die Karte wieder sichtbar wird (Tablet/Tab aus dem
+      // Hintergrund) - dort drosseln/pausieren Browser die Timer, sonst bleibt die
+      // "Jetzt"-Markierung eingefroren. Bei ueberfaelligen Daten neu laden, sonst nur rendern.
+      this._onVisible = () => {
+        if (document.visibilityState !== 'visible' || !this._hass || !this._initialized) return;
+        const age = Date.now() - (this._lastFetch || 0);
+        if (age >= this._config.refresh_interval * 1000) this._fetchAndRender();
+        else this._render();
+      };
+      document.addEventListener('visibilitychange', this._onVisible);
+    }
+  }
+  disconnectedCallback() {
+    this._stopRefreshTimer();
+    if (this._onVisible) { document.removeEventListener('visibilitychange', this._onVisible); this._onVisible = null; }
+    this._reqSeq = (this._reqSeq || 0) + 1; this._initialized = false;
+  }
   getCardSize() { return 3; }
   async _fetchAndRender() {
     if (!this._hass) return;
+    const myReq = ++this._reqSeq;
+    const people = this._resolvePeople(); // Punkt 8: leere/ungueltige Entities nicht abfragen
+    if (!people.length) {
+      this._noSource = true; this._perPersonDays = []; this._hasAny = false; this._lastError = false;
+      this._dates_cache = fscDates(this._config.days, this._config.skip_weekends);
+      this._lastFetch = Date.now();
+      this._render();
+      return;
+    }
+    this._noSource = false;
     const dates = fscDates(this._config.days, this._config.skip_weekends); if (!dates.length) return;
     const rangeStart = new Date(dates[0]); rangeStart.setHours(-6, 0, 0, 0);
     const rangeEnd = new Date(dates[dates.length - 1]); rangeEnd.setHours(30, 0, 0, 0);
     const startISO = rangeStart.toISOString(); const endISO = rangeEnd.toISOString();
-    const perPerson = await Promise.all(this._config.people.map(async (p) => {
+    const perPerson = await Promise.all(people.map(async (p) => {
       try {
         const events = await this._hass.callApi('GET', `calendars/${p.entity}?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`);
         return Object.assign({}, p, { events: events || [] });
       } catch (e) { console.error('family-overview-card:', p.entity, e); return Object.assign({}, p, { events: [], error: true }); }
     }));
+    if (myReq !== this._reqSeq) return; // Punkt 2
     const perPersonDays = perPerson.map((p) => {
       const days = dates.map((d) => ({ date: d, start: null, end: null }));
       const seen = new Set();
@@ -388,7 +770,7 @@ class FamilyOverviewCard extends HTMLElement {
         if (day.start === null || s < day.start) day.start = s;
         if (day.end === null || e > day.end) day.end = e;
       }
-      return Object.assign({}, p, { days });
+      return Object.assign({}, p, { days }); // behaelt p.error (Punkt 7: Fehler pro Person)
     });
     let minStart = null, maxEnd = null;
     for (const p of perPersonDays) for (const d of p.days) {
@@ -406,12 +788,15 @@ class FamilyOverviewCard extends HTMLElement {
     this._dates_cache = dates; this._perPersonDays = perPersonDays; this._hasAny = hasAny;
     this._dayStartMin = minStart; this._dayEndMin = maxEnd;
     this._lastError = perPerson.some((p) => p.error);
+    this._lastFetch = Date.now();
     this._render();
   }
   _render() {
     if (!this._config) return;
+    if (this._noSource) { this.innerHTML = fscSourcePlaceholder(); return; }
+    const validPeople = this._resolvePeople();
     const dates = this._dates_cache || fscDates(this._config.days, this._config.skip_weekends);
-    const perPersonDays = this._perPersonDays || this._config.people.map((p) => Object.assign({}, p, { days: dates.map((d) => ({ date: d, start: null, end: null })) }));
+    const perPersonDays = this._perPersonDays || validPeople.map((p) => Object.assign({}, p, { days: dates.map((d) => ({ date: d, start: null, end: null })) }));
     const showGrid = this._hasAny !== false;
     const dayStartMin = this._dayStartMin != null ? this._dayStartMin : 450;
     const dayEndMin = this._dayEndMin != null ? this._dayEndMin : 840;
@@ -427,34 +812,41 @@ class FamilyOverviewCard extends HTMLElement {
       const nowMark = showGrid && isToday && nowMin >= dayStartMin && nowMin <= dayEndMin
         ? `<div class="now-mark" style="left:${((nowMin - dayStartMin) / totalMin) * 100}%"></div>` : '';
       const rows = perPersonDays.map((p) => {
+        const col = fscSafeColor(p.color);
+        // Punkt 7: fehlerhafter Kalender einer Person darf nicht als "schulfrei" erscheinen.
+        if (p.error) {
+          return `<div class="row"><div class="row-name" style="color:${col}">${fscEsc(p.name)}</div><div class="row-track"><div class="row-empty">Fehler beim Laden</div></div></div>`;
+        }
         const d = p.days[di];
         if (!showGrid || !d || !d.start || !d.end) {
-          return `<div class="row"><div class="row-name" style="color:${p.color}">${fscEsc(p.name)}</div><div class="row-track"><div class="row-empty">schulfrei</div></div></div>`;
+          return `<div class="row"><div class="row-name" style="color:${col}">${fscEsc(p.name)}</div><div class="row-track"><div class="row-empty">schulfrei</div></div></div>`;
         }
         const s = Math.max(dayStartMin, fscMinOfDay(d.start));
         const e = Math.min(dayEndMin, fscMinOfDay(d.end));
         const left = ((s - dayStartMin) / totalMin) * 100;
         const width = Math.max(8, ((e - s) / totalMin) * 100);
         const label = `${timeFmt.format(d.start)}–${timeFmt.format(d.end)}`;
-        const fill = fscHexToRgba(p.color, 0.28);
-        return `<div class="row"><div class="row-name" style="color:${p.color}">${fscEsc(p.name)}</div><div class="row-track"><div class="bar" style="left:${left}%;width:${width}%;background:${fill};border-left:2px solid ${p.color}">${fscEsc(label)}</div></div></div>`;
+        const fill = fscHexToRgba(col, 0.28);
+        return `<div class="row"><div class="row-name" style="color:${col}">${fscEsc(p.name)}</div><div class="row-track"><div class="bar" style="left:${left}%;width:${width}%;background:${fill};border-left:2px solid ${col}">${fscEsc(label)}</div></div></div>`;
       }).join('');
       return `<div class="day-block"><div class="day-label${isToday ? ' today' : ''}">${fscEsc(dateLabel)}</div><div class="rows">${nowMark}${rows}</div></div>`;
     }).join('');
     const errNote = this._lastError ? '<div class="err">Kalenderdaten konnten nicht vollständig geladen werden.</div>' : '';
     this.innerHTML = `<ha-card>${this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : ''}<style>
-      ha-card{padding:14px 16px 12px}.title{font-size:1.3em;font-weight:400;margin-bottom:10px;color:var(--primary-text-color)}
-      .day-block{margin-bottom:10px}.day-block:last-child{margin-bottom:0}
-      .day-label{font-size:11px;font-weight:600;color:var(--secondary-text-color);text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px}
-      .day-label.today{color:var(--primary-text-color)}
-      .rows{position:relative;display:flex;flex-direction:column;gap:4px}
-      .row{display:flex;align-items:center;gap:6px}
-      .row-name{width:44px;flex:none;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-      .row-track{position:relative;flex:1;height:22px;border-radius:5px;background:rgba(128,128,128,0.12)}
-      .bar{position:absolute;top:0;bottom:0;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500;color:var(--primary-text-color);padding:0 4px;box-sizing:border-box;overflow:hidden;white-space:nowrap}
-      .row-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--secondary-text-color)}
-      .now-mark{position:absolute;top:-3px;bottom:-3px;width:0;border-left:2px dashed var(--error-color,#db4437);opacity:.6;z-index:2}
-      .err{margin-top:8px;font-size:11px;color:var(--error-color,#db4437)}
+      family-overview-card ha-card{padding:14px 16px 12px}
+      family-overview-card .title{font-size:1.3em;font-weight:400;margin-bottom:10px;color:var(--primary-text-color)}
+      family-overview-card .day-block{margin-bottom:10px}
+      family-overview-card .day-block:last-child{margin-bottom:0}
+      family-overview-card .day-label{font-size:11px;font-weight:600;color:var(--secondary-text-color);text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px}
+      family-overview-card .day-label.today{color:var(--primary-text-color)}
+      family-overview-card .rows{position:relative;display:flex;flex-direction:column;gap:4px}
+      family-overview-card .row{display:flex;align-items:center;gap:6px}
+      family-overview-card .row-name{width:44px;flex:none;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      family-overview-card .row-track{position:relative;flex:1;height:22px;border-radius:5px;background:rgba(128,128,128,0.12)}
+      family-overview-card .bar{position:absolute;top:0;bottom:0;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500;color:var(--primary-text-color);padding:0 4px;box-sizing:border-box;overflow:hidden;white-space:nowrap}
+      family-overview-card .row-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--secondary-text-color)}
+      family-overview-card .now-mark{position:absolute;top:-3px;bottom:-3px;width:0;border-left:2px dashed var(--error-color,#db4437);opacity:.6;z-index:2}
+      family-overview-card .err{margin-top:8px;font-size:11px;color:var(--error-color,#db4437)}
       </style><div class="blocks">${dayBlocks}</div>${errNote}</ha-card>`;
   }
 }
@@ -582,14 +974,29 @@ class FamilyHomeworkCard extends HTMLElement {
   static getConfigElement() {
     return document.createElement('family-homework-card-editor');
   }
-  static getStubConfig() {
-    return { title: '', entities: [], color: '#4fa8e0', days: 14 };
+  static getStubConfig(hass) {
+    const entity = fscPickCalendar(hass, { prefer: /hausaufgab/i });
+    return { title: '', people: entity ? [{ name: '', entity, color: '#4fa8e0' }] : [], days: 14 };
+  }
+  // Feature: vereinheitlicht people (neu, farbcodiert je Kind) und entities (Legacy)
+  // zu einer Quellenliste {name, entity, color}. people hat Vorrang; sonst wird jede
+  // entity als namenloses Kind mit der Kartenfarbe behandelt (unveraenderte Legacy-Darstellung).
+  _resolveSources() {
+    if (Array.isArray(this._config.people)) {
+      return this._config.people.filter((p) => p && fscIsCalendarEntity(p.entity));
+    }
+    return (this._config.entities || [])
+      .map((e) => (typeof e === 'string' ? e : (e && e.entity)))
+      .filter((e) => typeof e === 'string' && e.trim())
+      .map((entity) => ({ name: '', entity, color: this._config.color }));
   }
   setConfig(config) {
-    if (!config.entities || !config.entities.length) {
-      throw new Error('family-homework-card: "entities" (mind. 1 Kalender-Entity) ist erforderlich.');
-    }
+    this._stopRefreshTimer();
+    this._reqSeq = (this._reqSeq || 0) + 1;
     this._config = Object.assign({ days: 14, refresh_interval: 300, color: '#4fa8e0' }, config);
+    this._config.refresh_interval = fscRefreshInterval(this._config.refresh_interval);
+    this._peopleMode = Array.isArray(this._config.people); // farbcodierte Mehr-Kind-Darstellung
+    this._noSource = this._resolveSources().length === 0;
     this._initialized = false;
     this._render();
   }
@@ -601,29 +1008,43 @@ class FamilyHomeworkCard extends HTMLElement {
       this._interval = setInterval(() => this._fetchAndRender(), this._config.refresh_interval * 1000);
     }
   }
-  disconnectedCallback() { if (this._interval) { clearInterval(this._interval); this._interval = null; } this._initialized = false; }
+  _stopRefreshTimer() {
+    if (this._interval) { clearInterval(this._interval); this._interval = null; }
+  }
+  disconnectedCallback() { this._stopRefreshTimer(); this._reqSeq = (this._reqSeq || 0) + 1; this._initialized = false; }
   getCardSize() { return 4; }
   async _fetchAndRender() {
     if (!this._hass) return;
+    const myReq = ++this._reqSeq;
+    const sources = this._resolveSources();
+    if (!sources.length) {
+      this._noSource = true; this._items = []; this._lastError = false; this._partialError = false;
+      this._render();
+      return;
+    }
+    this._noSource = false;
     const start = new Date(); start.setHours(0, 0, 0, 0);
     const end = new Date(start); end.setDate(end.getDate() + this._config.days);
     const startISO = start.toISOString(); const endISO = end.toISOString();
-    let hadError = false;
-    const perEntity = await Promise.all(this._config.entities.map(async (ent) => {
-      const entityId = typeof ent === 'string' ? ent : ent.entity;
+    let errCount = 0;
+    const perSource = await Promise.all(sources.map(async (p) => {
       try {
-        const events = await this._hass.callApi('GET', `calendars/${entityId}?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`);
-        return events || [];
-      } catch (e) { console.error('family-homework-card:', entityId, e); hadError = true; return []; }
+        const events = await this._hass.callApi('GET', `calendars/${p.entity}?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`);
+        return { person: p, events: events || [] };
+      } catch (e) { console.error('family-homework-card:', p.entity, e); errCount += 1; return { person: p, events: [] }; }
     }));
+    if (myReq !== this._reqSeq) return; // Punkt 2
     const items = [];
     const seen = new Set();
-    for (const events of perEntity) {
+    for (const { person, events } of perSource) {
       for (const ev of events) {
         const startStr = ev.start && (ev.start.date || ev.start.dateTime);
         const endStr = ev.end && (ev.end.date || ev.end.dateTime);
         if (!startStr) continue;
-        const key = startStr + '|' + endStr + '|' + (ev.summary || '') + '|' + (ev.description || '');
+        // people-Modus: Entity im Schluessel (gleiche Aufgabe darf bei zwei Kindern zweimal
+        // erscheinen). Legacy-entities-Modus: OHNE Entity - erhaelt die alte Deduplizierung.
+        const baseKey = startStr + '|' + endStr + '|' + (ev.summary || '') + '|' + (ev.description || '');
+        const key = this._peopleMode ? (person.entity || '') + '|' + baseKey : baseKey;
         if (seen.has(key)) continue; seen.add(key);
         const given = ev.start.date ? new Date(ev.start.date + 'T00:00:00') : new Date(startStr);
         let due;
@@ -635,12 +1056,15 @@ class FamilyHomeworkCard extends HTMLElement {
         } else {
           due = new Date(startStr);
         }
-        items.push({ id: key, summary: ev.summary || '', description: ev.description || '', given, due });
+        items.push({ person, summary: ev.summary || '', description: ev.description || '', given, due });
       }
     }
     items.sort((a, b) => a.due - b.due);
     this._items = items;
-    this._lastError = hadError;
+    // Punkt 7/3: Vollfehler nur, wenn ALLE Quellen fehlgeschlagen sind; sonst Teilfehler
+    // mit erhaltenen Daten + Warnung (analog family-exam-card).
+    this._lastError = errCount > 0 && errCount === sources.length;
+    this._partialError = errCount > 0 && errCount < sources.length;
     this._render();
   }
   _linkify(text) {
@@ -649,64 +1073,269 @@ class FamilyHomeworkCard extends HTMLElement {
   }
   _render() {
     if (!this._config) return;
-    this.style.setProperty('--fsc-accent', this._config.color);
-    this.style.setProperty('--fsc-border', fscHexToRgba(this._config.color, 0.28));
+    if (this._noSource) { this.innerHTML = fscSourcePlaceholder(); return; }
+    const safeColor = fscSafeColor(this._config.color);
+    this.style.setProperty('--fsc-accent', safeColor);
+    this.style.setProperty('--fsc-border', fscHexToRgba(safeColor, 0.28));
     const items = this._items || [];
     const dateFmt = new Intl.DateTimeFormat('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
-    const rows = items.length === 0
-      ? '<div class="empty"><ha-icon icon="mdi:check"></ha-icon>Keine Hausaufgaben</div>'
-      : items.map((it) => {
+    // Punkt 7: bei Fehler nicht "Keine Hausaufgaben" vortaeuschen.
+    const listHtml = this._lastError
+      ? '<div class="err">Hausaufgaben konnten nicht geladen werden.</div>'
+      : (items.length === 0
+        ? '<div class="empty"><ha-icon icon="mdi:check"></ha-icon>Keine Hausaufgaben</div>'
+        : items.map((it) => {
           const range = fscSameDay(it.given, it.due)
             ? fscEsc(dateFmt.format(it.due))
             : `${fscEsc(dateFmt.format(it.given))} – ${fscEsc(dateFmt.format(it.due))}`;
           const desc = it.description
             ? `<div class="desc">${this._linkify(it.description).replace(/\n/g, '<br>')}</div>`
             : '<div class="desc empty-desc">Keine weiteren Details</div>';
-          return `<div class="item">
+          // Feature: Farbbalken + Namens-Chip je Kind (people-Modus); Legacy (entities) bleibt unveraendert.
+          const p = it.person || {};
+          const chipColor = fscSafeColor(p.color, safeColor);
+          const itemStyle = this._peopleMode ? ` style="border-left:3px solid ${chipColor};padding-left:9px"` : '';
+          const chip = (this._peopleMode && p.name)
+            ? `<span class="person" style="background:${fscHexToRgba(chipColor, 0.18)};color:${chipColor}">${fscEsc(p.name)}</span>` : '';
+          return `<div class="item"${itemStyle}>
                     <div class="item-head">
-                      <span class="range">${range}</span><span class="subj">${fscEsc(it.summary)}</span>
+                      <span class="range">${range}</span>${chip}<span class="subj">${fscEsc(it.summary)}</span>
                     </div>
                     ${desc}
                   </div>`;
-        }).join('');
+        }).join(''));
+    const partialErr = this._partialError ? '<div class="err">Einige Kalender konnten nicht geladen werden.</div>' : '';
     this.innerHTML = `<ha-card>${this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : ''}<style>
-      ha-card{padding:12px 16px;border:2px solid var(--fsc-border,var(--divider-color))}
-      .title{font-size:1.2em;font-weight:500;margin-bottom:8px;color:var(--fsc-accent,var(--primary-text-color))}
-      .item{border-top:1px solid var(--divider-color);padding:9px 2px}
-      .item:first-child{border-top:none;padding-top:0}
-      .item-head{display:flex;align-items:baseline;gap:10px;margin-bottom:4px;flex-wrap:wrap}
-      .range{font-size:14px;font-weight:500;color:var(--primary-text-color)}
-      .subj{font-size:14px;font-weight:500;color:var(--primary-text-color)}
-      .desc{font-size:13px;line-height:1.45;color:var(--primary-text-color);white-space:pre-wrap;user-select:text;-webkit-user-select:text}
-      .desc a{color:var(--fsc-accent,var(--primary-color))}
-      .empty-desc{color:var(--secondary-text-color);font-style:italic}
-      .empty{display:flex;align-items:center;gap:6px;padding:6px 2px;font-size:13px;color:var(--secondary-text-color)}
-      .err{margin-top:8px;font-size:11px;color:var(--error-color,#db4437)}
-      </style><div class="list">${rows}</div>${this._lastError ? '<div class="err">Kalenderdaten konnten nicht vollständig geladen werden.</div>' : ''}</ha-card>`;
+      family-homework-card ha-card{padding:12px 16px;border:2px solid var(--fsc-border,var(--divider-color))}
+      family-homework-card .title{font-size:1.2em;font-weight:500;margin-bottom:8px;color:var(--fsc-accent,var(--primary-text-color))}
+      family-homework-card .item{border-top:1px solid var(--divider-color);padding:9px 2px}
+      family-homework-card .item:first-child{border-top:none;padding-top:0}
+      family-homework-card .item-head{display:flex;align-items:baseline;gap:10px;margin-bottom:4px;flex-wrap:wrap}
+      family-homework-card .range{font-size:14px;font-weight:500;color:var(--primary-text-color)}
+      family-homework-card .person{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:2px 7px;border-radius:10px}
+      family-homework-card .subj{font-size:14px;font-weight:500;color:var(--primary-text-color)}
+      family-homework-card .desc{font-size:13px;line-height:1.45;color:var(--primary-text-color);white-space:pre-wrap;user-select:text;-webkit-user-select:text}
+      family-homework-card .desc a{color:var(--fsc-accent,var(--primary-color))}
+      family-homework-card .empty-desc{color:var(--secondary-text-color);font-style:italic}
+      family-homework-card .empty{display:flex;align-items:center;gap:6px;padding:6px 2px;font-size:13px;color:var(--secondary-text-color)}
+      family-homework-card .err{margin-top:0;font-size:13px;color:var(--error-color,#db4437)}
+      </style><div class="list">${listHtml}${partialErr}</div></ha-card>`;
   }
 }
 customElements.define('family-homework-card', FamilyHomeworkCard);
 
-/* ---------- Editor: family-homework-card ---------- */
-class FamilyHomeworkCardEditor extends FamilySingleEntityEditorBase {
-  _renderExtra() {
-    const slot = this.querySelector('#extra-slot');
-    slot.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;">
-      <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Vorschau-Zeitraum (Tage)</label>
-      <input id="days" type="number" min="1" max="60" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
-    </div>`;
-    const daysEl = slot.querySelector('#days');
+/* ---------- Editor: family-homework-card (zwei Modi) ----------
+ * Legacy-Modus (config.people ist KEIN Array): Titel, Tage, Kalender-Entity und Farbe sind voll
+ *   editierbar; ein expliziter Button "Auf Mehr-Kind-Modus umstellen" migriert bewusst auf people.
+ *   Normale Aenderungen erzeugen KEINEN people-Key - die Konfiguration bleibt Legacy.
+ * People-Modus (config.people ist ein Array): farbcodierte Kind-Zeilen (Name/Kalender/Farbe,
+ *   hinzufuegen/entfernen). Neue Karten starten hier (getStubConfig liefert people). */
+class FamilyHomeworkCardEditor extends HTMLElement {
+  constructor() { super(); this._rendered = false; this._rowRefs = []; }
+  _isPeopleMode() { return Array.isArray(this._config && this._config.people); }
+  setConfig(config) {
+    // Legacy-Config (ohne people) NICHT mit people:[] anreichern - sonst wuerde die Karte die
+    // entities-Quelle verlieren (people hat Vorrang, sobald es ein Array ist).
+    const hasPeople = Array.isArray(config.people);
+    this._config = Object.assign({}, config);
+    if (hasPeople) this._config.people = config.people.map((p) => Object.assign({}, p));
+    const newMode = hasPeople ? 'people' : 'legacy';
+    if (!this._rendered) { if (this._hass) this._render(); return; }
+    if (newMode !== this._renderedMode) { this._render(); return; }
+    if (newMode === 'people') {
+      const newLen = this._config.people.length;
+      if (newLen !== this._peopleLen) this._renderRows();
+      else this._syncRows();
+    } else {
+      this._syncLegacy();
+    }
+  }
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._rendered) { if (this._config) this._render(); return; }
+    this.querySelectorAll('ha-entity-picker').forEach((p) => { p.hass = hass; });
+  }
+  _render() {
+    if (!this._config) return;
+    this._rendered = true;
+    if (this._isPeopleMode()) this._renderPeople();
+    else this._renderLegacy();
+  }
+  // ---- Legacy-Modus (entities) ----
+  _legacyFirstEntity() {
+    const e = (this._config.entities || [])[0];
+    return (typeof e === 'string' ? e : (e && e.entity)) || '';
+  }
+  _renderLegacy() {
+    this._renderedMode = 'legacy';
+    this.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px;">
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <label for="title" style="font-size:12px;color:var(--secondary-text-color);">Titel (z.B. Name des Kindes)</label>
+          <input id="title" type="text" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Vorschau-Zeitraum (Tage)</label>
+          <input id="days" type="number" min="1" max="60" style="width:220px;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+        </div>
+        <div id="entity-slot"></div>
+        <div style="display:flex;gap:12px;align-items:center;">
+          <label style="font-size:14px;color:var(--secondary-text-color);min-width:70px;">Farbe</label>
+          <input id="color" type="color" style="width:48px;height:32px;border:none;background:none;cursor:pointer">
+        </div>
+        <mwc-button id="to-people" outlined>Auf Mehr-Kind-Modus umstellen</mwc-button>
+      </div>`;
+    const titleEl = this.querySelector('#title');
+    titleEl.value = this._config.title || '';
+    titleEl.addEventListener('input', () => { this._config.title = titleEl.value; this._fireChanged(); });
+    const daysEl = this.querySelector('#days');
+    daysEl.value = this._config.days != null ? this._config.days : 14;
     daysEl.addEventListener('input', () => {
       const v = parseInt(daysEl.value, 10);
       this._config.days = isNaN(v) ? 14 : v;
       this._fireChanged();
     });
+    const picker = document.createElement('ha-entity-picker');
+    picker.includeDomains = ['calendar'];
+    picker.label = 'Kalender-Entity';
+    picker.hass = this._hass;
+    picker.value = this._legacyFirstEntity();
+    picker.addEventListener('value-changed', (ev) => {
+      ev.stopPropagation();
+      this._config.entities = ev.detail.value ? [ev.detail.value] : [];
+      this._fireChanged();
+    });
+    this.querySelector('#entity-slot').appendChild(picker);
+    const colorEl = this.querySelector('#color');
+    colorEl.value = this._config.color || '#4fa8e0';
+    colorEl.addEventListener('input', () => { this._config.color = colorEl.value; this._fireChanged(); });
+    this.querySelector('#to-people').addEventListener('click', () => this._migrate());
   }
-  _syncFields() {
-    super._syncFields();
+  _syncLegacy() {
+    const titleEl = this.querySelector('#title');
+    if (titleEl && document.activeElement !== titleEl) titleEl.value = this._config.title || '';
     const daysEl = this.querySelector('#days');
     if (daysEl && document.activeElement !== daysEl) daysEl.value = this._config.days != null ? this._config.days : 14;
+    const picker = this.querySelector('ha-entity-picker');
+    if (picker) picker.value = this._legacyFirstEntity();
+    const colorEl = this.querySelector('#color');
+    if (colorEl && document.activeElement !== colorEl) colorEl.value = this._config.color || '#4fa8e0';
   }
+  _migrate() {
+    // Bewusste Migration Legacy -> people (nur auf expliziten Klick): vorhandene Kalender + die
+    // Kartenfarbe uebernehmen, Namen leer lassen, danach entities entfernen. Keine Quelle verlieren.
+    const color = this._config.color || '#4fa8e0';
+    const entities = (this._config.entities || [])
+      .map((e) => (typeof e === 'string' ? e : (e && e.entity)))
+      .filter((e) => typeof e === 'string' && e.trim());
+    const people = entities.length
+      ? entities.map((entity) => ({ name: '', entity, color }))
+      : [{ name: '', entity: '', color }];
+    this._config = Object.assign({}, this._config, { people });
+    delete this._config.entities;
+    this._render();
+    this._fireChanged();
+  }
+  // ---- People-Modus ----
+  _renderPeople() {
+    this._renderedMode = 'people';
+    this.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:16px;padding:8px 2px;">
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <label for="title" style="font-size:12px;color:var(--secondary-text-color);">Titel</label>
+          <input id="title" type="text" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Vorschau-Zeitraum (Tage)</label>
+          <input id="days" type="number" min="1" max="60" style="width:220px;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+        </div>
+        <div id="rows" style="display:flex;flex-direction:column;gap:8px;"></div>
+        <mwc-button id="add-row" raised>+ Kind hinzufügen</mwc-button>
+      </div>`;
+    const titleEl = this.querySelector('#title');
+    titleEl.value = this._config.title || '';
+    titleEl.addEventListener('input', () => { this._config.title = titleEl.value; this._fireChanged(); });
+    const daysEl = this.querySelector('#days');
+    daysEl.value = this._config.days != null ? this._config.days : 14;
+    daysEl.addEventListener('input', () => {
+      const v = parseInt(daysEl.value, 10);
+      this._config.days = isNaN(v) ? 14 : v;
+      this._fireChanged();
+    });
+    this.querySelector('#add-row').addEventListener('click', () => {
+      this._config.people = [...(this._config.people || []), { name: '', entity: '', color: '#4fa8e0' }];
+      this._renderRows();
+      this._fireChanged();
+    });
+    this._renderRows();
+  }
+  _syncRows() {
+    (this._config.people || []).forEach((person, idx) => {
+      const refs = this._rowRefs[idx];
+      if (!refs) return;
+      if (document.activeElement !== refs.nameEl) refs.nameEl.value = person.name || '';
+      if (refs.picker.value !== (person.entity || '')) refs.picker.value = person.entity || '';
+      if (document.activeElement !== refs.colorEl) refs.colorEl.value = person.color || '#4fa8e0';
+    });
+  }
+  _renderRows() {
+    const container = this.querySelector('#rows');
+    if (!container) return;
+    this._peopleLen = (this._config.people || []).length;
+    container.innerHTML = '';
+    this._rowRefs = [];
+    (this._config.people || []).forEach((person, idx) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;border:1px solid var(--divider-color);border-radius:8px;padding:8px;';
+
+      const nameEl = document.createElement('input');
+      nameEl.type = 'text';
+      nameEl.placeholder = 'Name';
+      nameEl.style.cssText = 'width:110px;box-sizing:border-box;padding:6px 8px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;';
+      nameEl.value = person.name || '';
+      nameEl.addEventListener('input', () => {
+        this._config.people[idx].name = nameEl.value;
+        this._fireChanged();
+      });
+
+      const picker = document.createElement('ha-entity-picker');
+      picker.includeDomains = ['calendar'];
+      picker.label = 'Kalender';
+      picker.hass = this._hass;
+      picker.value = person.entity || '';
+      picker.style.flex = '1';
+      picker.addEventListener('value-changed', (ev) => {
+        ev.stopPropagation();
+        this._config.people[idx].entity = ev.detail.value || '';
+        this._fireChanged();
+      });
+
+      const colorEl = document.createElement('input');
+      colorEl.type = 'color';
+      colorEl.value = person.color || '#4fa8e0';
+      colorEl.style.cssText = 'width:40px;height:32px;border:none;background:none;cursor:pointer;flex:none;';
+      colorEl.addEventListener('input', () => {
+        this._config.people[idx].color = colorEl.value;
+        this._fireChanged();
+      });
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = '✕';
+      removeBtn.title = 'Kind entfernen';
+      removeBtn.style.cssText = 'border:none;background:none;color:var(--error-color,#db4437);font-size:16px;cursor:pointer;padding:4px 8px;flex:none;';
+      removeBtn.addEventListener('click', () => {
+        this._config.people.splice(idx, 1);
+        this._renderRows();
+        this._fireChanged();
+      });
+
+      row.append(nameEl, picker, colorEl, removeBtn);
+      container.appendChild(row);
+      this._rowRefs.push({ nameEl, picker, colorEl });
+    });
+  }
+  _fireChanged() { fscFireConfigChanged(this, this._config); }
 }
 customElements.define('family-homework-card-editor', FamilyHomeworkCardEditor);
 
@@ -724,14 +1353,19 @@ class FamilyExamCard extends HTMLElement {
   static getConfigElement() {
     return document.createElement('family-exam-card-editor');
   }
-  static getStubConfig() {
-    return { title: 'Klassenarbeiten', people: [], days: 60, max_items: 5 };
+  static getStubConfig(hass) {
+    const entity = fscPickCalendar(hass, { prefer: /(pruef|pruf|klausur|exam)/i });
+    return { title: 'Klassenarbeiten', people: entity ? [{ name: '', entity, color: '#4fa8e0' }] : [], days: 60, max_items: 5 };
+  }
+  _resolvePeople() {
+    return (this._config.people || []).filter((p) => p && fscIsCalendarEntity(p.entity));
   }
   setConfig(config) {
-    if (!config.people || !config.people.length) {
-      throw new Error('family-exam-card: "people" (mind. 1 Kalender-Entity) ist erforderlich.');
-    }
+    this._stopRefreshTimer();
+    this._reqSeq = (this._reqSeq || 0) + 1;
     this._config = Object.assign({ days: 60, max_items: 5, refresh_interval: 300 }, config);
+    this._config.refresh_interval = fscRefreshInterval(this._config.refresh_interval);
+    this._noSource = this._resolvePeople().length === 0;
     this._initialized = false;
     this._render();
   }
@@ -743,20 +1377,32 @@ class FamilyExamCard extends HTMLElement {
       this._interval = setInterval(() => this._fetchAndRender(), this._config.refresh_interval * 1000);
     }
   }
-  disconnectedCallback() { if (this._interval) { clearInterval(this._interval); this._interval = null; } this._initialized = false; }
+  _stopRefreshTimer() {
+    if (this._interval) { clearInterval(this._interval); this._interval = null; }
+  }
+  disconnectedCallback() { this._stopRefreshTimer(); this._reqSeq = (this._reqSeq || 0) + 1; this._initialized = false; }
   getCardSize() { return 4; }
   async _fetchAndRender() {
     if (!this._hass) return;
+    const myReq = ++this._reqSeq;
+    const people = this._resolvePeople(); // Punkt 8
+    if (!people.length) {
+      this._noSource = true; this._items = []; this._lastError = false; this._partialError = false;
+      this._render();
+      return;
+    }
+    this._noSource = false;
     const start = new Date(); start.setHours(0, 0, 0, 0);
     const end = new Date(start); end.setDate(end.getDate() + this._config.days);
     const startISO = start.toISOString(); const endISO = end.toISOString();
-    let hadError = false;
-    const perPerson = await Promise.all(this._config.people.map(async (p) => {
+    let errCount = 0;
+    const perPerson = await Promise.all(people.map(async (p) => {
       try {
         const events = await this._hass.callApi('GET', `calendars/${p.entity}?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`);
         return { person: p, events: events || [] };
-      } catch (e) { console.error('family-exam-card:', p.entity, e); hadError = true; return { person: p, events: [] }; }
+      } catch (e) { console.error('family-exam-card:', p.entity, e); errCount += 1; return { person: p, events: [] }; }
     }));
+    if (myReq !== this._reqSeq) return; // Punkt 2
     const items = [];
     const seen = new Set();
     for (const { person, events } of perPerson) {
@@ -781,7 +1427,10 @@ class FamilyExamCard extends HTMLElement {
     }
     items.sort((a, b) => a.due - b.due);
     this._items = items.slice(0, this._config.max_items);
-    this._lastError = hadError;
+    // Punkt 7/3: konsistent zu Timetable/Homework - Vollfehler nur bei ALLEN fehlgeschlagenen
+    // Personen; sonst Teilfehler (erfolgreiche/leere Daten + Warnung).
+    this._lastError = errCount > 0 && errCount === people.length;
+    this._partialError = errCount > 0 && errCount < people.length;
     this._render();
   }
   _linkify(text) {
@@ -790,20 +1439,23 @@ class FamilyExamCard extends HTMLElement {
   }
   _render() {
     if (!this._config) return;
+    if (this._noSource) { this.innerHTML = fscSourcePlaceholder(); return; }
     const items = this._items || [];
     const dateFmt = new Intl.DateTimeFormat('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
-    const rows = items.length === 0
-      ? '<div class="empty"><ha-icon icon="mdi:check"></ha-icon>Keine Klassenarbeiten</div>'
-      : items.map((it) => {
-          const range = fscSameDay(it.given, it.due)
-            ? fscEsc(dateFmt.format(it.due))
-            : `${fscEsc(dateFmt.format(it.given))} – ${fscEsc(dateFmt.format(it.due))}`;
-          const desc = it.description
-            ? `<div class="desc">${this._linkify(it.description).replace(/\n/g, '<br>')}</div>`
-            : '';
-          const chipBg = fscHexToRgba(it.person.color || '#4fa8e0', 0.18);
-          const chipColor = it.person.color || '#4fa8e0';
-          return `<div class="item">
+    // Punkt 7: geladene Eintraege behalten, aber bei leerer Liste + Fehler nicht
+    // "Keine Klassenarbeiten" vortaeuschen; Teilfehler separat kennzeichnen.
+    let listHtml;
+    if (items.length > 0) {
+      listHtml = items.map((it) => {
+        const range = fscSameDay(it.given, it.due)
+          ? fscEsc(dateFmt.format(it.due))
+          : `${fscEsc(dateFmt.format(it.given))} – ${fscEsc(dateFmt.format(it.due))}`;
+        const desc = it.description
+          ? `<div class="desc">${this._linkify(it.description).replace(/\n/g, '<br>')}</div>`
+          : '';
+        const chipColor = fscSafeColor(it.person.color);
+        const chipBg = fscHexToRgba(chipColor, 0.18);
+        return `<div class="item">
                     <div class="item-head">
                       <span class="range">${range}</span>
                       <span class="person" style="background:${chipBg};color:${chipColor}">${fscEsc(it.person.name)}</span>
@@ -811,21 +1463,28 @@ class FamilyExamCard extends HTMLElement {
                     </div>
                     ${desc}
                   </div>`;
-        }).join('');
+      }).join('');
+    } else if (this._lastError) {
+      listHtml = '<div class="err">Klassenarbeiten konnten nicht geladen werden.</div>';
+    } else {
+      listHtml = '<div class="empty"><ha-icon icon="mdi:check"></ha-icon>Keine Klassenarbeiten</div>';
+    }
+    const partialErr = this._partialError
+      ? '<div class="err">Einige Kalender konnten nicht geladen werden.</div>' : '';
     this.innerHTML = `<ha-card>${this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : ''}<style>
-      ha-card{padding:12px 16px;border:2px solid var(--divider-color)}
-      .title{font-size:1.2em;font-weight:500;margin-bottom:8px;color:var(--primary-text-color)}
-      .item{border-top:1px solid var(--divider-color);padding:9px 2px}
-      .item:first-child{border-top:none;padding-top:0}
-      .item-head{display:flex;align-items:baseline;gap:8px;margin-bottom:4px;flex-wrap:wrap}
-      .range{font-size:14px;font-weight:500;color:var(--primary-text-color)}
-      .person{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:2px 7px;border-radius:10px}
-      .subj{font-size:14px;font-weight:500;color:var(--primary-text-color)}
-      .desc{font-size:13px;line-height:1.45;color:var(--primary-text-color);white-space:pre-wrap;user-select:text;-webkit-user-select:text}
-      .desc a{color:var(--primary-color)}
-      .empty{display:flex;align-items:center;gap:6px;padding:6px 2px;font-size:13px;color:var(--secondary-text-color)}
-      .err{margin-top:8px;font-size:11px;color:var(--error-color,#db4437)}
-      </style><div class="list">${rows}</div>${this._lastError ? '<div class="err">Kalenderdaten konnten nicht vollständig geladen werden.</div>' : ''}</ha-card>`;
+      family-exam-card ha-card{padding:12px 16px;border:2px solid var(--divider-color)}
+      family-exam-card .title{font-size:1.2em;font-weight:500;margin-bottom:8px;color:var(--primary-text-color)}
+      family-exam-card .item{border-top:1px solid var(--divider-color);padding:9px 2px}
+      family-exam-card .item:first-child{border-top:none;padding-top:0}
+      family-exam-card .item-head{display:flex;align-items:baseline;gap:8px;margin-bottom:4px;flex-wrap:wrap}
+      family-exam-card .range{font-size:14px;font-weight:500;color:var(--primary-text-color)}
+      family-exam-card .person{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:2px 7px;border-radius:10px}
+      family-exam-card .subj{font-size:14px;font-weight:500;color:var(--primary-text-color)}
+      family-exam-card .desc{font-size:13px;line-height:1.45;color:var(--primary-text-color);white-space:pre-wrap;user-select:text;-webkit-user-select:text}
+      family-exam-card .desc a{color:var(--primary-color)}
+      family-exam-card .empty{display:flex;align-items:center;gap:6px;padding:6px 2px;font-size:13px;color:var(--secondary-text-color)}
+      family-exam-card .err{margin-top:8px;font-size:13px;color:var(--error-color,#db4437)}
+      </style><div class="list">${listHtml}</div>${partialErr}</ha-card>`;
   }
 }
 customElements.define('family-exam-card', FamilyExamCard);
@@ -968,20 +1627,20 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'family-timetable-card',
   name: 'Family Timetable Card',
-  description: 'WebUntis-Stundenplan (heute/morgen) auf gemeinsamer Zeitachse, fuer ein Kind.',
+  description: 'Stundenplan (heute/folgende Tage) auf gemeinsamer Zeitachse, fuer ein Kind. Klick-Detail-Popup, optionaler Mensa-Hinweis. Jede HA-Kalender-Entity; WebUntis zusaetzlich mit Entfall-/Vertretungsfarben.',
 });
 window.customCards.push({
   type: 'family-overview-card',
   name: 'Family Overview Card',
-  description: 'Kompakte "Wer muss wann los"-Uebersicht fuer mehrere Kinder.',
+  description: 'Kompakte "Wer muss wann los"-Uebersicht fuer mehrere Kinder. Beliebige HA-Kalender-Entities.',
 });
 window.customCards.push({
   type: 'family-homework-card',
   name: 'Family Homework Card',
-  description: 'Direkt lesbare WebUntis-Hausaufgabenliste, fuer ein Kind.',
+  description: 'Hausaufgabenliste, farbcodiert je Kind (people) oder klassisch (entities). Beliebige HA-Kalender-Entities.',
 });
 window.customCards.push({
   type: 'family-exam-card',
   name: 'Family Exam Card',
-  description: 'Farbcodierte WebUntis-Klassenarbeitenliste fuer ein oder mehrere Kinder, max. N Eintraege waehlbar.',
+  description: 'Farbcodierte Klausurenliste fuer ein oder mehrere Kinder, max. N Eintraege waehlbar. Beliebige HA-Kalender-Entities (z. B. iServ per CalDAV).',
 });

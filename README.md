@@ -1,9 +1,18 @@
 # Family School Cards
 
-Drei Lovelace-Karten für Home Assistant, die WebUntis-Stundenpläne (über die
-Integration [`JonasJoKuJonas/homeassistant-WebUntis`](https://github.com/JonasJoKuJonas/homeassistant-WebUntis))
-lesbar auf dem Dashboard darstellen — inklusive entfallener Stunden und
-Sonderveranstaltungen (Einschulung, Klassenlehrerunterricht, Wandertag, …).
+Vier kompakte Lovelace-Karten für Home Assistant, die **Stundenpläne,
+Hausaufgaben und Klausuren von Kindern** lesbar auf dem Dashboard darstellen.
+
+**Funktioniert mit jeder HA-Kalender-Entity** — Google Calendar, CalDAV
+(z. B. iServ), ICS/Remote-Kalender, lokaler HA-Kalender. Entstanden ist das
+Kartenset aus dem Bedarf rund um **WebUntis** (über die Integration
+[`JonasJoKuJonas/homeassistant-WebUntis`](https://github.com/JonasJoKuJonas/homeassistant-WebUntis)),
+und WebUntis bleibt die am besten unterstützte Quelle: **nur dort** blendet die
+Stundenplan-Karte zusätzlich Farb-/Statuskennungen für **entfallene Stunden,
+Vertretungen und Sonderveranstaltungen** ein (Heuristik über die
+`Cancelled:`/`Irregular:`-Präfixe im `summary`). Mit anderen Kalendern werden
+Einträge schlicht als normale Blöcke gezeigt — voll funktionsfähig, nur ohne
+diese Hervorhebung.
 
 Reines Frontend-Plugin (Lovelace-Karten), **keine** Home-Assistant-Integration:
 kein Python, kein Neustart bei Updates, Installation und Updates laufen über
@@ -13,24 +22,47 @@ HACS wie bei jeder anderen Custom Card.
 
 | Karte | Zweck | Für |
 |---|---|---|
-| `family-timetable-card` | Zeitraster-Stundenplan (heute + folgende Tage auf gemeinsamer Zeitachse) | ein Kind |
+| `family-timetable-card` | Zeitraster-Stundenplan (heute + folgende Tage auf gemeinsamer Zeitachse), Klick-Detail-Popup, optionaler Mensa-Hinweis | ein Kind |
 | `family-overview-card` | Kompakte "Wer muss wann los"-Balkenübersicht | mehrere Kinder |
-| `family-homework-card` | Direkt lesbare Hausaufgabenliste mit klickbaren Links | ein Kind |
+| `family-homework-card` | Hausaufgabenliste, farbcodiert je Kind, mit klickbaren Links | ein oder mehrere Kinder |
+| `family-exam-card` | Farbcodierte Klassenarbeiten-/Prüfungsliste, chronologisch gemischt | ein oder mehrere Kinder |
 
-Für mehrere Kinder: `family-timetable-card` und `family-homework-card` je
-einmal pro Kind auf dem Dashboard platzieren (über den visuellen Editor, kein
-YAML nötig). `family-overview-card` ist eine einzelne Karte, in der Kinder
-über "+ Kind hinzufügen" ergänzt werden.
+Für mehrere Kinder: `family-timetable-card` je einmal pro Kind auf dem Dashboard
+platzieren. `family-overview-card`, `family-homework-card` und `family-exam-card`
+sind je eine einzelne Karte, in der Kinder über "+ Kind hinzufügen" ergänzt und
+farblich unterschieden werden.
 
-Alle drei Karten haben einen visuellen Editor (Entity-Picker, Farbwähler,
+Alle vier Karten haben einen visuellen Editor (Entity-Picker, Farbwähler,
 Textfelder) — YAML-Bearbeitung bleibt über "Als YAML bearbeiten" im
 Karten-Dialog weiterhin möglich.
+
+## Universell nutzbar (jede Kalender-Entity)
+
+`overview`, `homework` und `exam` sind vollständig kalender-agnostisch: sie lesen
+nur die Standard-Kalenderfelder (`start`, `end`, `summary`, `description`,
+`location`) über die HA-Kalender-API. Jede Kalender-Entity funktioniert. Die
+`timetable`-Karte funktioniert ebenfalls mit jedem Kalender; die
+WebUntis-Statusfarben (Entfall/Vertretung/Sonderveranstaltung) sind das einzige
+WebUntis-spezifische Extra und entfallen bei Fremdkalendern kommentarlos.
+
+## Neue Funktionen
+
+- **Klick-Detail-Popup (Stundenplan):** Klick auf einen Eintrag öffnet ein
+  natives `ha-dialog` mit Titel, Status (Änderung/Entfallen/Sonderveranstaltung),
+  Datum, Zeit, Raum und Beschreibung.
+- **Hausaufgaben farbcodiert je Kind:** `family-homework-card` unterstützt jetzt
+  eine `people`-Liste (Farbbalken + Namens-Chip pro Kind, analog zur
+  Klausurkarte). Bestehende `entities`-Konfigurationen laufen unverändert weiter
+  (siehe Abwärtskompatibilität unten).
+- **Optionaler Mensa-Hinweis (Stundenplan):** pro Tag ein Hinweis
+  „kein Essen bestellt" / „Essen abbestellen?" aus eigenen `binary_sensor`-Entities;
+  im Editor an-/abschaltbar, standardmäßig aus, verschiebungsfrei im Header.
 
 ## family-exam-card
 
 Farbcodierte Klassenarbeiten-/Prüfungsliste für ein oder mehrere Kinder. Analog zu `family-homework-card`, aber mit einer `people`-Liste (wie bei `family-overview-card`) statt einer einzelnen Kalender-Entity: alle ausgewählten Kalender werden chronologisch zu **einer** Liste gemischt und farblich nach Kind gekennzeichnet. `max_items` begrenzt die Gesamtliste, nicht pro Kind — wer nur ein Kind einträgt, bekommt dessen nächste Arbeiten; wer mehrere einträgt, bekommt eine gemeinsame Übersicht.
 
-Voraussetzung: Die WebUntis-Integration muss für Prüfungen/Klassenarbeiten konfiguriert sein und liefert dafür eine eigene `calendar.*_pruefungen`-Entity pro Kind (parallel zur Stundenplan- und Hausaufgaben-Entity).
+Als Quelle dient ein beliebiger HA-Kalender mit den Klassenarbeiten/Prüfungen. Bei Nutzung von WebUntis für Prüfungen liefert die Integration dafür eine eigene `calendar.*_pruefungen`-Entity pro Kind (parallel zur Stundenplan- und Hausaufgaben-Entity); grundsätzlich funktioniert die Karte aber mit jeder passenden Kalender-Entity.
 
 ### Konfiguration
 
@@ -65,9 +97,14 @@ Wie bei den anderen Karten gibt es einen visuellen Card-Editor (Name, Kalender-E
 
 ---
 
-## Voraussetzung: WebUntis-Integration
+## Nutzung mit WebUntis
 
-Jedes Kind braucht eine eigene Kalender-Entity aus der Integration
+Die Karten funktionieren mit jeder HA-Kalender-Entity (siehe oben). Dieser
+Abschnitt beschreibt den WebUntis-Weg, für den das Kartenset ursprünglich
+entstanden ist.
+
+Bei Nutzung von WebUntis braucht jedes Kind eine eigene Kalender-Entity aus der
+Integration
 [`JonasJoKuJonas/homeassistant-WebUntis`](https://github.com/JonasJoKuJonas/homeassistant-WebUntis)
 (über HACS installierbar, Kategorie "Integration").
 
@@ -126,7 +163,7 @@ erscheinen. Bisher nicht beobachtet, aber gut zu wissen.
 ## Installation über HACS
 
 1. HACS → Menü (⋮) → Benutzerdefinierte Repositories.
-2. Repository-URL: `https://github.com/jot-koehler/family-school-cards`
+2. Repository-URL: `https://github.com/jot-koehler/webuntis-family-cards`
    Kategorie: **Dashboard** (Lovelace-Plugin).
 3. "Family School Cards" installieren.
 4. HACS registriert die Ressource automatisch im Dashboard (`hacs.json` mit
@@ -138,8 +175,8 @@ Updates erscheinen danach wie gewohnt als HACS-Update-Badge.
 ## Karten hinzufügen
 
 Im Dashboard: "Karte hinzufügen" → nach "Family Timetable", "Family
-Overview" bzw. "Family Homework" suchen → Entity und Farbe im Editor
-auswählen.
+Overview", "Family Homework" bzw. "Family Exam" suchen → Entity und Farbe
+im Editor auswählen.
 
 Beispiel-YAML (falls lieber manuell konfiguriert):
 
@@ -167,26 +204,59 @@ people:
 
 ---
 type: custom:family-homework-card
-title: Kind A
-entities:
-  - calendar.webuntis_kind_a_hausaufgaben
-color: "#ff9800"
+title: Hausaufgaben
 days: 14
+people:
+  - name: Kind A
+    entity: calendar.webuntis_kind_a_hausaufgaben
+    color: "#ff9800"
+  - name: Kind B
+    entity: calendar.webuntis_kind_b_hausaufgaben
+    color: "#4caf50"
+
+---
+type: custom:family-exam-card
+title: Klassenarbeiten
+days: 60
+max_items: 5
+people:
+  - name: Kind A
+    entity: calendar.webuntis_kind_a_pruefungen
+    color: "#ff9800"
+  - name: Kind B
+    entity: calendar.webuntis_kind_b_pruefungen
+    color: "#4caf50"
 ```
 
 ### Konfigurationsoptionen
 
 | Option | Karte | Bedeutung | Default |
 |---|---|---|---|
-| `title` | timetable, homework | Überschrift der Karte | — |
-| `entities` | timetable, homework | Liste von Kalender-Entities (i. d. R. eine) | erforderlich |
-| `color` | timetable, homework, overview (pro Kind) | Akzentfarbe (Hex) | `#4fa8e0` |
+| `title` | timetable, homework, exam | Überschrift der Karte | — |
+| `people` | overview, homework, exam | Liste `{name, entity, color}` — ein Eintrag pro Kind (farbcodiert) | erforderlich |
+| `entities` | timetable, homework (Legacy) | Liste von Kalender-Entities (bei homework: klassischer Einzel-Kind-Modus ohne Farbcodierung) | erforderlich |
+| `color` | timetable, homework/overview/exam (pro Kind) | Akzentfarbe (Hex) | `#4fa8e0` |
 | `days` | timetable | Anzahl dargestellter Tage ab heute (Wochenenden werden übersprungen) | `2` |
 | `days` | homework | Vorschau-Zeitraum in Tagen | `14` |
 | `days` | overview | Anzahl dargestellter Tage ab heute | `2` |
-| `people` | overview | Liste `{name, entity, color}` — ein Eintrag pro Kind | erforderlich |
+| `days` | exam | Vorschau-Zeitraum in Tagen | `60` |
+| `max_items` | exam | Maximale Anzahl Einträge in der zusammengeführten Liste | `5` |
 | `skip_weekends` | timetable, overview | Samstag/Sonntag überspringen | `true` |
+| `show_mensa` | timetable | Mensa-Hinweis einblenden | `false` |
+| `mensa_entities` | timetable | Liste `binary_sensor.*` (an = bestellt), ein Eintrag pro dargestelltem Tag | — |
+| `mensa_link` | timetable | Optionaler Bestell-Link, auf den der Hinweis verweist | — |
+| `afternoon_threshold` | timetable | Ab dieser Uhrzeit gilt der Tag als Nachmittagsschul-Tag (= Essensbedarf) | `13:00` |
 | `refresh_interval` | alle | Sekunden zwischen Neuabruf der Kalenderdaten | `300` |
+
+### Hausaufgaben: farbcodiert (people) oder klassisch (entities)
+
+`family-homework-card` unterstützt zwei Modi:
+- **`people`** (empfohlen, neu): mehrere Kinder in **einer** Karte, jedes mit Farbbalken und Namens-Chip — analog zu `family-exam-card`.
+- **`entities`** (Legacy, vollständig unterstützt): eine Karte pro Kind, ohne Farbcodierung. Bestehende YAML-Konfigurationen laufen unverändert weiter und bleiben im **visuellen Editor vollständig bearbeitbar** (Titel, Tage, Kalender-Entity, Farbe). Der Wechsel auf `people` erfolgt **bewusst** über den Editor-Button „Auf Mehr-Kind-Modus umstellen"; vorhandene Kalender und die Kartenfarbe werden dabei übernommen (keine Quelle geht verloren). Normale Änderungen im Legacy-Modus erzeugen keinen `people`-Key.
+
+### Mensa-Hinweis (optional)
+
+Im Editor der Stundenplan-Karte „Mensa-Hinweis anzeigen" aktivieren und pro dargestelltem Tag einen `binary_sensor` wählen (an = Essen bestellt). Zeigt an Nachmittagsschul-Tagen ohne Bestellung „kein Essen bestellt", bei Bestellung ohne Nachmittagsunterricht „Essen abbestellen?". Standardmäßig aus; ohne konfigurierte Sensoren passiert nichts. Der Hinweis liegt in einem reservierten Header-Bereich und verschiebt das Stundenraster nicht.
 
 ---
 
@@ -194,8 +264,8 @@ days: 14
 
 - Die special/changed-Unterscheidung ist eine Heuristik (siehe oben) und
   kann bei ungewöhnlichen Datenlagen daneben liegen.
-- Kein Drag&Drop zum Umsortieren der Kinder im Overview-Editor — Zeilen
-  werden in der Reihenfolge angelegt, in der sie hinzugefügt wurden.
+- Kein Drag&Drop zum Umsortieren der Kinder in den Editoren (Overview/Homework/Exam) —
+  Zeilen werden in der Reihenfolge angelegt, in der sie hinzugefügt wurden.
 - Keine mobile-App-Vorschau im Editor — Layout ist auf Handy-Nutzung hin
   optimiert (kompakte Höhe), aber im Editor selbst nur als Live-Karte
   unterhalb des Formulars sichtbar, wie bei jeder Lovelace-Karte.
