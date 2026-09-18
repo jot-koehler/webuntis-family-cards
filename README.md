@@ -36,6 +36,22 @@ Alle vier Karten haben einen visuellen Editor (Entity-Picker, Farbwähler,
 Textfelder) — YAML-Bearbeitung bleibt über "Als YAML bearbeiten" im
 Karten-Dialog weiterhin möglich.
 
+
+## Screenshots
+
+### Stundenplan
+![Family Timetable Card](docs/images/timetable.png)
+
+### Familienübersicht
+![Family Overview Card](docs/images/overview.png)
+
+### Hausaufgaben
+![Family Homework Card](docs/images/homework.png)
+
+### Klassenarbeiten
+![Family Exam Card](docs/images/exam.png)
+
+
 ## Universell nutzbar (jede Kalender-Entity)
 
 `overview`, `homework` und `exam` sind vollständig kalender-agnostisch: sie lesen
