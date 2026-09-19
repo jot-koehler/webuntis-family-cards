@@ -3,6 +3,45 @@
 Alle nennenswerten Änderungen an **Family School Cards**.
 Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/); Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [1.3.0] – 2026-09-19
+
+Mensa-Hinweis von „ein Sensor pro Position" auf eine **datumsbasierte** Zuordnung
+umgestellt und um ein Menü-Detail-Popup erweitert; kleinere visuelle Angleichung
+der Klausurkarte. **Abwärtskompatibel** – bestehende Konfigurationen laufen weiter
+(Legacy-Positions-Fallback), Custom-Element-Namen und `hacs.json` unverändert,
+keine neuen Abhängigkeiten.
+
+### Neu
+- **Datumsbasierte Mensa-Zuordnung** (`family-timetable-card`): Jeder dargestellte
+  Tag wählt aus `mensa_entities` den Sensor mit passendem `date`-Attribut
+  (`YYYY-MM-DD`, lokal normiert – kein `toISOString()`/UTC-Versatz). Reihenfolge und
+  Anzahl sind damit egal; es lassen sich z. B. 10 Forecast-Sensoren hinterlegen,
+  während die Karte nur wenige Tage zeigt. Bei mehreren Entities für dasselbe Datum
+  gewinnt deterministisch der erste Treffer.
+- **Vollständige Statuslogik** mit vier sichtbaren Zuständen plus „keine Daten":
+  neutral „nicht bestellt", orange „Essen abbestellen?", rot „Kein Essen bestellt",
+  grün „Essen bestellt". Neues Attribut `available` (`false` → **kein** Hinweis,
+  damit ein Datenausfall nicht wie „nichts bestellt" aussieht); fehlt das Attribut,
+  gilt `true` (Legacy-kompatibel).
+- **Menü-Detail-Popup:** Klick auf einen bestellten Tag öffnet ein natives
+  `ha-dialog` mit Datum, `menu_text` und Positionen (`items` mit Menge/Preis) statt
+  des generischen HA-More-Info. Klick auf einen nicht bestellten Tag öffnet den
+  `mensa_link` (Fallback: More-Info). Tastaturbedienbar (Enter/Space). Im Popup
+  bestellter Tage zusätzlich ein optionaler „Umbestellen"-Button auf den `mensa_link`.
+- **Editor:** `mensa_entities` als reine Entity-Liste (bis zu 10) statt „Tag 1/2/…";
+  die Tageszuordnung erfolgt über das Datum.
+
+### Geändert
+- **`family-exam-card`** visuell an `family-homework-card` angeglichen: Farbbalken
+  je Kind (3px in Kindfarbe) und einheitlicher `item-head`-Abstand.
+- Kartentitel von `family-homework-card` nutzt jetzt `--primary-text-color` (wie
+  `family-exam-card`) statt der Akzentfarbe.
+
+### Unverändert
+- Custom-Element-Namen, `hacs.json`, Abhängigkeiten (keine). Bestehende
+  `mensa_entities`-Konfigurationen ohne `date`-Attribut laufen über den
+  Positions-Fallback weiter.
+
 ## [1.2.0] – 2026-09-18
 
 Sammel-Release: Robustheits-Bugfixes, vier neue Funktionen und ein Fix für die
@@ -58,5 +97,6 @@ umbenannten Custom Elements, `hacs.json` unverändert.
 ## [1.1.0]
 - Vorheriger veröffentlichter Stand (vier Karten in der Ausgangsfassung).
 
+[1.3.0]: https://github.com/jot-koehler/webuntis-family-cards/releases/tag/v1.3.0
 [1.2.0]: https://github.com/jot-koehler/webuntis-family-cards/releases/tag/v1.2.0
 [1.1.0]: https://github.com/jot-koehler/webuntis-family-cards/releases/tag/v1.1.0

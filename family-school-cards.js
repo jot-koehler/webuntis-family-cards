@@ -46,6 +46,35 @@ function fscSameDay(a, b) {
 
 function fscMinOfDay(d) { return d.getHours() * 60 + d.getMinutes(); }
 
+/* Lokales ISO-Datum YYYY-MM-DD OHNE UTC-Verschiebung. Bewusst KEIN toISOString(),
+ * das in UTC rechnet und an Tages-/Monats-/Jahresgrenzen (Zeitzone, Sommerzeit) um
+ * einen Tag springen kann. Nutzt ausschliesslich die lokalen Datumsfelder - passend
+ * zu den Buckets, die ebenfalls lokal (new Date(), setHours) erzeugt werden. */
+function fscLocalISODate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/* Mensa-Attribut "available" robust interpretieren (nicht nur JS-Truthiness):
+ * - Attribut fehlt        -> Legacy-kompatibel als true (alte Sensoren ohne dieses Feld).
+ * - false / 0             -> false
+ * - "false" / "0"         -> false (case-insensitive, getrimmt)
+ * - alles andere          -> true
+ * Zweck: ein vom Scraper nicht erreichter Tag (available=false) darf NICHT wie ein
+ * bestaetigtes "nichts bestellt" aussehen. */
+function fscMensaAvailable(st) {
+  if (!st || !st.attributes || !('available' in st.attributes)) return true;
+  const v = st.attributes.available;
+  if (v === false || v === 0) return false;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    if (s === 'false' || s === '0') return false;
+  }
+  return true;
+}
+
 function fscDates(count, skipWeekends) {
   const out = []; let d = new Date(); d.setHours(0, 0, 0, 0); let guard = 0;
   while (out.length < count && guard < 30) {
@@ -204,6 +233,15 @@ class FamilyTimetableCard extends HTMLElement {
     // Feature: Klick auf einen Eintrag -> Detail-Popup. Delegation am Host, damit der
     // Listener ueber die innerHTML-Neuaufbauten hinweg bestehen bleibt (einmalig gebunden).
     this.addEventListener('click', (ev) => {
+      // Mensa-Hinweis mit aufgeloestem Entity -> aktionsabhaengiger Klick (siehe _mensaClick).
+      // Der Bestell-Link fuer nicht bestellte Tage (<a href=mensa_link>) traegt KEIN
+      // data-entity und wird hier nicht abgefangen, sondern regulaer vom Browser geoeffnet.
+      const hintEl = ev.target && ev.target.closest ? ev.target.closest('.mensa-hint[data-entity]') : null;
+      if (hintEl && this.contains(hintEl)) {
+        const entityId = hintEl.getAttribute('data-entity');
+        if (entityId) this._mensaClick(entityId);
+        return;
+      }
       const el = ev.target && ev.target.closest ? ev.target.closest('.event') : null;
       if (!el || !this.contains(el)) return;
       const di = Number(el.getAttribute('data-di'));
@@ -212,6 +250,106 @@ class FamilyTimetableCard extends HTMLElement {
       const item = bucket && bucket.items && bucket.items[ii];
       if (item) this._openDetail(item);
     });
+    // Tastaturbedienung fuer den klickbaren Mensa-Hinweis (role=button/tabindex=0).
+    this.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
+      const hintEl = ev.target && ev.target.closest ? ev.target.closest('.mensa-hint[data-entity]') : null;
+      if (!hintEl || !this.contains(hintEl)) return;
+      ev.preventDefault();
+      const entityId = hintEl.getAttribute('data-entity');
+      if (entityId) this._mensaClick(entityId);
+    });
+  }
+  // Aktionsabhaengiger Klick auf einen Mensa-Hinweis:
+  // - bestellt (state on)  -> eigenes Detail-Popup mit Menuetext/Positionen
+  //                           (das native HA-More-Info zeigt fuer einen binary_sensor
+  //                            nur Verlauf/Logbook, nicht brauchbar das Menue).
+  // - nicht bestellt        -> hier landet nur der Fall OHNE mensa_link (mit Link
+  //                           rendert die Karte stattdessen ein <a>); Fallback = More-Info.
+  _mensaClick(entityId) {
+    const st = this._hass && this._hass.states ? this._hass.states[entityId] : null;
+    if (st && st.state === 'on') this._openMensaDetail(st);
+    else this._openMensaMoreInfo(entityId);
+  }
+  _openMensaMoreInfo(entityId) {
+    // Standard-HA-Event: oeffnet den regulaeren More-Info-Dialog fuer die Entity.
+    // composed:true, damit das Event die Card-Grenze zum Dashboard hin passiert.
+    this.dispatchEvent(new CustomEvent('hass-more-info', {
+      detail: { entityId }, bubbles: true, composed: true,
+    }));
+  }
+  _openMensaDetail(st) {
+    // Eigenes Mensa-Detail im gleichen ha-dialog-Stil wie _openDetail (Termine),
+    // aber eigener Dialog (this._mensaDialog), damit sich beide nicht ins Gehege kommen.
+    const a = (st && st.attributes) || {};
+    if (!this._mensaDialog) {
+      this._mensaDialog = document.createElement('ha-dialog');
+      this._mensaDialog.addEventListener('closed', () => { if (this._mensaDialog) this._mensaDialog.open = false; });
+      document.body.appendChild(this._mensaDialog);
+    }
+    // Datum menschenlesbar; bei fehlendem/ungueltigem date-Attribut neutraler Titel.
+    let dateLabel = '';
+    const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(a.date || '').trim());
+    if (dm) {
+      const d = new Date(Number(dm[1]), Number(dm[2]) - 1, Number(dm[3]));
+      dateLabel = new Intl.DateTimeFormat('de-DE', { weekday: 'long', day: 'numeric', month: 'long' }).format(d);
+    }
+    const title = dateLabel ? `Mensa – ${dateLabel}` : 'Mensa';
+    const hasHeaderTitle = ('headerTitle' in this._mensaDialog);
+    const hasHeading = ('heading' in this._mensaDialog);
+    let fallbackTitleHtml = '';
+    if (hasHeaderTitle) { this._mensaDialog.headerTitle = title; }
+    else if (hasHeading) { this._mensaDialog.heading = title; }
+    else { fallbackTitleHtml = `<div class="fsc-dlg-title">${fscEsc(title)}</div>`; }
+    // Positionen (items) bevorzugt als Liste mit Linie/Text/Menge/Preis; sonst menu_text;
+    // sonst neutraler Hinweis. Preise nur zeigen, wenn vorhanden.
+    const items = Array.isArray(a.items) ? a.items : [];
+    let bodyHtml;
+    if (items.length) {
+      bodyHtml = '<div class="fsc-mensa-items">' + items.map((it) => {
+        const line = it && it.line ? `<div class="fsc-mensa-line">${fscEsc(it.line)}</div>` : '';
+        const qty = (it && (it.qty || it.qty === 0)) ? `${it.qty}× ` : '';
+        const priceNum = it && (typeof it.price_eur === 'number') ? it.price_eur : null;
+        const price = priceNum != null ? ` · ${priceNum.toFixed(2).replace('.', ',')} €` : '';
+        const text = it && it.text ? fscEsc(it.text) : '';
+        return `<div class="fsc-mensa-item">${line}<div class="fsc-mensa-text">${fscEsc(qty)}${text}${fscEsc(price)}</div></div>`;
+      }).join('') + '</div>';
+    } else if (a.menu_text && String(a.menu_text).trim() && String(a.menu_text).trim() !== '—') {
+      bodyHtml = `<div class="fsc-mensa-text">${fscEsc(a.menu_text)}</div>`;
+    } else {
+      bodyHtml = '<div class="fsc-mensa-text" style="color:var(--secondary-text-color)">Bestellt – kein Menütext hinterlegt.</div>';
+    }
+    // Optionaler "Umbestellen"-Button -> oeffnet den Bestell-Link (nur wenn gesetzt).
+    // Stil analog zum "Essen bestellt"-Badge: getoenter Hintergrund + farbiger Text,
+    // gedecktes Gelb/Amber (--warning-color).
+    const orderLink = (this._config && this._config.mensa_link) ? String(this._config.mensa_link) : '';
+    const reorderHtml = orderLink
+      ? `<a class="fsc-mensa-reorder" href="${fscEsc(orderLink)}" target="_blank" rel="noopener noreferrer">Umbestellen</a>`
+      : '';
+    this._mensaDialog.innerHTML = `
+      <style>
+        .fsc-dlg-title{font-size:18px;font-weight:600;color:var(--primary-text-color);margin-bottom:12px}
+        .fsc-mensa-badge{display:inline-block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:3px 8px;border-radius:10px;margin-bottom:12px;background:rgba(79,176,106,0.18);color:var(--success-color,#4fb06a)}
+        .fsc-mensa-items{display:flex;flex-direction:column;gap:10px}
+        .fsc-mensa-item{border-left:3px solid var(--success-color,#4fb06a);padding-left:10px}
+        .fsc-mensa-line{font-size:12px;color:var(--secondary-text-color);margin-bottom:2px}
+        .fsc-mensa-text{font-size:14px;color:var(--primary-text-color);line-height:1.4}
+        .fsc-dlg-actions{display:flex;align-items:center;gap:12px;margin-top:16px}
+        .fsc-mensa-reorder{display:inline-block;font:inherit;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;text-decoration:none;padding:8px 14px;border-radius:8px;background:rgba(224,168,79,0.18);color:var(--warning-color,#e0a84f);border:1px solid rgba(224,168,79,0.45);cursor:pointer}
+        .fsc-mensa-reorder:hover{background:rgba(224,168,79,0.30)}
+        .fsc-dlg-close{font:inherit;font-weight:600;color:var(--primary-color);background:none;border:none;padding:8px 12px;border-radius:6px;cursor:pointer;margin-left:auto}
+        .fsc-dlg-close:hover{background:rgba(var(--rgb-primary-color,79,168,224),0.12)}
+      </style>
+      <div style="padding:4px 4px 8px;min-width:240px;">
+        ${fallbackTitleHtml}
+        <div class="fsc-mensa-badge">Essen bestellt</div>
+        ${bodyHtml}
+        <div class="fsc-dlg-actions">${reorderHtml}<button type="button" class="fsc-dlg-close">Schließen</button></div>
+      </div>
+    `;
+    const closeBtn = this._mensaDialog.querySelector('.fsc-dlg-close');
+    if (closeBtn) closeBtn.addEventListener('click', () => { this._mensaDialog.open = false; });
+    this._mensaDialog.open = true;
   }
   disconnectedCallback() {
     this._stopRefreshTimer();
@@ -219,6 +357,7 @@ class FamilyTimetableCard extends HTMLElement {
     this._reqSeq = (this._reqSeq || 0) + 1;
     this._initialized = false;
     if (this._dialog) { this._dialog.open = false; this._dialog.remove(); this._dialog = null; }
+    if (this._mensaDialog) { this._mensaDialog.open = false; this._mensaDialog.remove(); this._mensaDialog = null; }
   }
   _openDetail(item) {
     if (!this._dialog) {
@@ -275,21 +414,60 @@ class FamilyTimetableCard extends HTMLElement {
     if (closeBtn) closeBtn.addEventListener('click', () => { this._dialog.open = false; });
     this._dialog.open = true;
   }
-  // Feature Mensa (optional): Hinweis pro Tag, wenn show_mensa aktiv und ein binary_sensor
-  // fuer diesen Tag konfiguriert ist. "an" = bestellt. Nur relevant, wenn an dem Tag
-  // Nachmittagsunterricht (>= afternoon_threshold) stattfindet.
+  // Feature Mensa: Zuordnung eines Mensa-binary_sensor zu einem dargestellten Tag.
+  // NEU (v1.3): datumsgesteuert statt positionsbasiert. Zuerst wird unter allen
+  // konfigurierten mensa_entities eines gesucht, dessen attributes.date exakt dem
+  // (lokalen) Bucket-Datum entspricht. Erst wenn kein Datums-Treffer existiert, greift
+  // der Legacy-Positions-Fallback mensa_entities[bucketIdx] - und das AUCH nur, wenn das
+  // Entity an dieser Position gar KEIN gueltiges date-Attribut besitzt (echte Alt-Config).
+  // Ein Entity mit gueltigem, aber abweichendem Datum wird niemals positionsbasiert genutzt.
+  // Rueckgabe: { entityId, st, source: 'date'|'legacy' } oder null.
+  _resolveMensaEntity(bucket, bucketIdx) {
+    const entities = this._config.mensa_entities;
+    if (!Array.isArray(entities) || !this._hass || !this._hass.states || !bucket) return null;
+    const wantIso = fscLocalISODate(bucket.date);
+    // 1. Datums-Match (ausschliesslich normiertes lokales YYYY-MM-DD, kein toISOString()).
+    // Bei mehreren Entities mit demselben date gilt deterministisch "first match wins"
+    // (Reihenfolge in mensa_entities) - bewusst keine weitere Konfliktlogik.
+    for (const id of entities) {
+      if (!id) continue;
+      const st = this._hass.states[id];
+      if (!st || !st.attributes) continue;
+      const dattr = st.attributes.date;
+      if (typeof dattr === 'string' && dattr.trim() === wantIso) {
+        return { entityId: id, st, source: 'date' };
+      }
+    }
+    // 2. Legacy-Positions-Fallback: nur fuer ein Entity OHNE verwertbares date-Attribut.
+    const legacyId = entities[bucketIdx];
+    if (legacyId) {
+      const st = this._hass.states[legacyId];
+      if (st && st.attributes) {
+        const dattr = st.attributes.date;
+        const hasValidDate = typeof dattr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dattr.trim());
+        // hasValidDate === true bedeutet: Datum vorhanden, hat aber (s.o.) nicht gematcht
+        //   -> abweichender gueltiger Tag -> NICHT positionsbasiert verwenden.
+        if (!hasValidDate) return { entityId: legacyId, st, source: 'legacy' };
+      }
+    }
+    return null;
+  }
+  // Hinweis-Objekt pro dargestelltem Tag. Liefert null = kein Hinweis rendern.
+  // Vollstaendige Falllogik (siehe README): available=false -> kein Hinweis; sonst
+  // vier Zustaende aus (Nachmittagsunterricht ja/nein) x (bestellt ja/nein).
   _mensaHint(bucketIdx) {
     if (!this._config.show_mensa) return null;
-    const entities = this._config.mensa_entities;
-    if (!Array.isArray(entities) || !entities[bucketIdx] || !this._hass) return null;
-    const st = this._hass.states[entities[bucketIdx]];
-    if (!st) return null;
-    // Punkt 4: nur bei belastbarem Zustand (on/off) urteilen - unknown/unavailable = kein Hinweis.
-    if (st.state !== 'on' && st.state !== 'off') return null;
-    const ordered = st.state === 'on';
     const b = this._buckets && this._buckets[bucketIdx];
     if (!b) return null;
-    // Punkt 5: afternoon_threshold als HH:MM validieren, sonst Default 13:00 (kein 00:00-Fehlwert).
+    const resolved = this._resolveMensaEntity(b, bucketIdx);
+    if (!resolved) return null; // kein aufloesbares Entity -> kein Hinweis (auch kein Link-Fallback)
+    const st = resolved.st;
+    // available=false -> ueberhaupt kein Hinweis (Datenluecke, nicht "nichts bestellt").
+    if (!fscMensaAvailable(st)) return null;
+    // Nur belastbarer Zustand (on/off) - unknown/unavailable = kein Hinweis.
+    if (st.state !== 'on' && st.state !== 'off') return null;
+    const ordered = st.state === 'on';
+    // afternoon_threshold als HH:MM validieren, sonst Default 13:00 (kein 00:00-Fehlwert).
     const tm = /^(\d{1,2}):(\d{2})$/.exec(String(this._config.afternoon_threshold || '').trim());
     let thresholdMin = 13 * 60;
     if (tm) {
@@ -297,9 +475,12 @@ class FamilyTimetableCard extends HTMLElement {
       if (ah >= 0 && ah <= 23 && am >= 0 && am <= 59) thresholdMin = ah * 60 + am;
     }
     const hasAfternoon = b.items.some((it) => !it.cancelled && fscMinOfDay(it.start) >= thresholdMin);
-    if (hasAfternoon && !ordered) return { text: 'kein Essen bestellt', cls: 'warn' };
-    if (ordered && !hasAfternoon) return { text: 'Essen abbestellen?', cls: 'info' };
-    return null;
+    let text; let cls; let clickable;
+    if (!hasAfternoon && !ordered) { text = 'nicht bestellt'; cls = 'neutral'; clickable = false; }
+    else if (!hasAfternoon && ordered) { text = 'Essen abbestellen?'; cls = 'info'; clickable = true; }
+    else if (hasAfternoon && !ordered) { text = 'Kein Essen bestellt'; cls = 'warn'; clickable = true; }
+    else { text = 'Essen bestellt'; cls = 'ok'; clickable = true; }
+    return { text, cls, clickable, ordered, entityId: resolved.entityId, source: resolved.source };
   }
   getCardSize() { return 5; }
   _layoutColumns(items) {
@@ -416,6 +597,10 @@ class FamilyTimetableCard extends HTMLElement {
       family-timetable-card .mensa-hint{display:block;font-size:11px;font-weight:700;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       family-timetable-card .mensa-hint.warn{color:#e05f4f}
       family-timetable-card .mensa-hint.info{color:#e0a84f}
+      family-timetable-card .mensa-hint.ok{color:var(--success-color,#4fb06a)}
+      family-timetable-card .mensa-hint.neutral{color:var(--secondary-text-color);font-weight:400;background:transparent;border:0}
+      family-timetable-card .mensa-hint.clickable{cursor:pointer}
+      family-timetable-card .mensa-hint.clickable:focus-visible{outline:2px solid var(--fsc-accent,var(--primary-color));outline-offset:2px;border-radius:3px}
       family-timetable-card .day-body{position:relative}
       family-timetable-card .event{position:absolute;background:rgba(var(--rgb-primary-color,79,168,224),0.16);border-left:3px solid var(--fsc-accent,var(--primary-color));border-radius:6px;padding:5px 8px;box-sizing:border-box;overflow:hidden;cursor:pointer;-webkit-tap-highlight-color:transparent}
       family-timetable-card .event.changed{border-left-color:#e0a84f;background:rgba(224,168,79,0.16)}
@@ -455,11 +640,23 @@ class FamilyTimetableCard extends HTMLElement {
     const dayCols = buckets.map((b, di) => {
       const isToday = fscSameDay(b.date, now);
       const hint = mensaActive ? this._mensaHint(di) : null;
-      const hintInner = hint
-        ? (this._config.mensa_link
-            ? `<a class="mensa-hint ${hint.cls}" href="${fscEsc(this._config.mensa_link)}" target="_blank" rel="noopener noreferrer">${fscEsc(hint.text)}</a>`
-            : `<span class="mensa-hint ${hint.cls}">${fscEsc(hint.text)}</span>`)
-        : '';
+      let hintInner = '';
+      if (hint) {
+        if (hint.clickable && hint.ordered && hint.entityId) {
+          // Bestellt -> eigenes Menue-Detail-Popup (Klick-Handler liest das Entity und
+          // oeffnet _openMensaDetail). data-entity markiert den Hinweis als klickbar.
+          hintInner = `<span class="mensa-hint ${hint.cls} clickable" role="button" tabindex="0" data-entity="${fscEsc(hint.entityId)}">${fscEsc(hint.text)}</span>`;
+        } else if (hint.clickable && !hint.ordered && this._config.mensa_link) {
+          // Nicht bestellt + Bestell-Link gesetzt -> externer Link zur Mensa (Bestellen).
+          hintInner = `<a class="mensa-hint ${hint.cls} clickable" href="${fscEsc(this._config.mensa_link)}" target="_blank" rel="noopener noreferrer">${fscEsc(hint.text)}</a>`;
+        } else if (hint.clickable && hint.entityId) {
+          // Nicht bestellt, aber kein mensa_link -> Fallback natives More-Info (besser als tot).
+          hintInner = `<span class="mensa-hint ${hint.cls} clickable" role="button" tabindex="0" data-entity="${fscEsc(hint.entityId)}">${fscEsc(hint.text)}</span>`;
+        } else {
+          // Neutral bzw. nicht klickbar (z.B. "nicht bestellt").
+          hintInner = `<span class="mensa-hint ${hint.cls}">${fscEsc(hint.text)}</span>`;
+        }
+      }
       const mensaSlot = mensaActive ? `<div class="mensa-slot">${hintInner}</div>` : '';
       const bodyStyle = showGrid ? `height:${heightPx}px` : '';
       const layout = this._layoutColumns(b.items);
@@ -578,9 +775,9 @@ class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
           <input id="show_mensa" type="checkbox"> Mensa-Hinweis anzeigen
         </label>
         <div id="mensa-cfg" style="display:none;flex-direction:column;gap:10px;">
-          <div style="font-size:11px;color:var(--secondary-text-color);">Ein binary_sensor pro angezeigtem Tag (an = bestellt), in Tagesreihenfolge.</div>
+          <div style="font-size:11px;color:var(--secondary-text-color);">Mensa-Entities (binary_sensor, an = bestellt). Die Zuordnung zum jeweiligen Tag erfolgt automatisch über das Datum (Attribut <code>date</code>); die Reihenfolge spielt keine Rolle. Bis zu 10 Entities.</div>
           <div id="mensa-rows" style="display:flex;flex-direction:column;gap:6px;"></div>
-          <mwc-button id="mensa-add" dense>+ Tag/Sensor</mwc-button>
+          <mwc-button id="mensa-add" dense>+ Mensa-Entity</mwc-button>
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label for="mensa_link" style="font-size:12px;color:var(--secondary-text-color);">Bestell-Link (optional)</label>
             <input id="mensa_link" type="text" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
@@ -604,7 +801,9 @@ class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
       this._fireChanged();
     });
     slot.querySelector('#mensa-add').addEventListener('click', () => {
-      this._config.mensa_entities = [...(this._config.mensa_entities || []), ''];
+      const cur = this._config.mensa_entities || [];
+      if (cur.length >= 10) return; // bis zu 10 Mensa-Entities (Forecast-Tiefe)
+      this._config.mensa_entities = [...cur, ''];
       this._renderMensaRows();
       this._fireChanged();
     });
@@ -623,7 +822,7 @@ class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
       row.style.cssText = 'display:flex;gap:8px;align-items:center;';
       const picker = document.createElement('ha-entity-picker');
       picker.includeDomains = ['binary_sensor'];
-      picker.label = `Tag ${idx + 1}`;
+      picker.label = `Mensa-Entity ${idx + 1}`;
       picker.hass = this._hass;
       picker.value = entId || '';
       picker.style.flex = '1';
@@ -1107,7 +1306,7 @@ class FamilyHomeworkCard extends HTMLElement {
     const partialErr = this._partialError ? '<div class="err">Einige Kalender konnten nicht geladen werden.</div>' : '';
     this.innerHTML = `<ha-card>${this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : ''}<style>
       family-homework-card ha-card{padding:12px 16px;border:2px solid var(--fsc-border,var(--divider-color))}
-      family-homework-card .title{font-size:1.2em;font-weight:500;margin-bottom:8px;color:var(--fsc-accent,var(--primary-text-color))}
+      family-homework-card .title{font-size:1.2em;font-weight:500;margin-bottom:8px;color:var(--primary-text-color)}
       family-homework-card .item{border-top:1px solid var(--divider-color);padding:9px 2px}
       family-homework-card .item:first-child{border-top:none;padding-top:0}
       family-homework-card .item-head{display:flex;align-items:baseline;gap:10px;margin-bottom:4px;flex-wrap:wrap}
@@ -1455,7 +1654,9 @@ class FamilyExamCard extends HTMLElement {
           : '';
         const chipColor = fscSafeColor(it.person.color);
         const chipBg = fscHexToRgba(chipColor, 0.18);
-        return `<div class="item">
+        // Farbbalken je Kind analog family-homework-card (people-Modus): 3px linke Kante
+        // in der Kind-Farbe + Einrueckung, damit beide Karten visuell konsistent sind.
+        return `<div class="item" style="border-left:3px solid ${chipColor};padding-left:9px">
                     <div class="item-head">
                       <span class="range">${range}</span>
                       <span class="person" style="background:${chipBg};color:${chipColor}">${fscEsc(it.person.name)}</span>
@@ -1476,7 +1677,7 @@ class FamilyExamCard extends HTMLElement {
       family-exam-card .title{font-size:1.2em;font-weight:500;margin-bottom:8px;color:var(--primary-text-color)}
       family-exam-card .item{border-top:1px solid var(--divider-color);padding:9px 2px}
       family-exam-card .item:first-child{border-top:none;padding-top:0}
-      family-exam-card .item-head{display:flex;align-items:baseline;gap:8px;margin-bottom:4px;flex-wrap:wrap}
+      family-exam-card .item-head{display:flex;align-items:baseline;gap:10px;margin-bottom:4px;flex-wrap:wrap}
       family-exam-card .range{font-size:14px;font-weight:500;color:var(--primary-text-color)}
       family-exam-card .person{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:2px 7px;border-radius:10px}
       family-exam-card .subj{font-size:14px;font-weight:500;color:var(--primary-text-color)}

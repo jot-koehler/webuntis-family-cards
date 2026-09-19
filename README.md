@@ -70,9 +70,13 @@ WebUntis-spezifische Extra und entfallen bei Fremdkalendern kommentarlos.
   eine `people`-Liste (Farbbalken + Namens-Chip pro Kind, analog zur
   Klausurkarte). Bestehende `entities`-Konfigurationen laufen unverändert weiter
   (siehe Abwärtskompatibilität unten).
-- **Optionaler Mensa-Hinweis (Stundenplan):** pro Tag ein Hinweis
-  „kein Essen bestellt" / „Essen abbestellen?" aus eigenen `binary_sensor`-Entities;
-  im Editor an-/abschaltbar, standardmäßig aus, verschiebungsfrei im Header.
+- **Optionaler Mensa-Hinweis (Stundenplan):** pro Tag ein Status aus eigenen
+  `binary_sensor`-Entities („Essen bestellt" / „Essen abbestellen?" / „Kein Essen
+  bestellt" / „nicht bestellt"). Zuordnung **datumsbasiert** über das Attribut
+  `date`, dadurch unabhängig von der Anzahl sichtbarer Tage (bis zu 10
+  Forecast-Sensoren). Klick auf einen bestellten Tag öffnet ein Menü-Popup
+  (`menu_text`/`items`), Klick auf einen nicht bestellten Tag den `mensa_link`.
+  Im Editor an-/abschaltbar, standardmäßig aus, verschiebungsfrei im Header.
 
 ## family-exam-card
 
@@ -259,8 +263,8 @@ people:
 | `max_items` | exam | Maximale Anzahl Einträge in der zusammengeführten Liste | `5` |
 | `skip_weekends` | timetable, overview | Samstag/Sonntag überspringen | `true` |
 | `show_mensa` | timetable | Mensa-Hinweis einblenden | `false` |
-| `mensa_entities` | timetable | Liste `binary_sensor.*` (an = bestellt), ein Eintrag pro dargestelltem Tag | — |
-| `mensa_link` | timetable | Optionaler Bestell-Link, auf den der Hinweis verweist | — |
+| `mensa_entities` | timetable | Liste `binary_sensor.*` (an = bestellt). Zuordnung zum jeweiligen Tag über das Attribut `date` (`YYYY-MM-DD`) — Reihenfolge und Anzahl egal, bis zu 10 Entities. Sensoren ohne `date` werden per Position zugeordnet (Legacy). | — |
+| `mensa_link` | timetable | Optionaler Bestell-Link. Klick auf einen **nicht** bestellten Tag (rot) öffnet ihn. | — |
 | `afternoon_threshold` | timetable | Ab dieser Uhrzeit gilt der Tag als Nachmittagsschul-Tag (= Essensbedarf) | `13:00` |
 | `refresh_interval` | alle | Sekunden zwischen Neuabruf der Kalenderdaten | `300` |
 
@@ -272,7 +276,25 @@ people:
 
 ### Mensa-Hinweis (optional)
 
-Im Editor der Stundenplan-Karte „Mensa-Hinweis anzeigen" aktivieren und pro dargestelltem Tag einen `binary_sensor` wählen (an = Essen bestellt). Zeigt an Nachmittagsschul-Tagen ohne Bestellung „kein Essen bestellt", bei Bestellung ohne Nachmittagsunterricht „Essen abbestellen?". Standardmäßig aus; ohne konfigurierte Sensoren passiert nichts. Der Hinweis liegt in einem reservierten Header-Bereich und verschiebt das Stundenraster nicht.
+Im Editor der Stundenplan-Karte „Mensa-Hinweis anzeigen" aktivieren und die `binary_sensor`-Entities auswählen (an = bestellt). Standardmäßig aus; ohne konfigurierte Sensoren passiert nichts. Der Hinweis liegt in einem reservierten Header-Bereich und verschiebt das Stundenraster nicht.
+
+**Datumsbasierte Zuordnung:** Jeder dargestellte Tag sucht sich aus den konfigurierten Entities denjenigen mit passendem `date`-Attribut (`YYYY-MM-DD`) heraus. Reihenfolge und Anzahl spielen daher keine Rolle — man kann z. B. 10 Forecast-Sensoren hinterlegen, obwohl die Karte nur 3 Tage zeigt; sie nutzt jeweils die passenden. Bei zwei Entities für dasselbe Datum gewinnt der erste Treffer. Ein Sensor **ohne** gültiges `date` wird per Position zugeordnet (Legacy-Kompatibilität); ein Sensor mit gültigem, aber abweichendem Datum wird nie an einem anderen Tag verwendet.
+
+**Erwartete Attribute je Entity:** `date` (`YYYY-MM-DD`), Zustand `on`/`off` (bestellt), optional `available` (`false` = für diesen Tag liegen keine Daten vor → kein Hinweis; fehlt das Attribut, gilt `true`), sowie für das Menü-Popup `menu_text` und `items` (`[{line, text, qty, price_eur}]`).
+
+**Statuslogik** (nur relevant, wenn an dem Tag Nachmittagsunterricht ab `afternoon_threshold` stattfindet):
+
+| `available` | Nachmittag | bestellt | Anzeige | Klick |
+|---|---|---|---|---|
+| `false` | – | – | *(kein Hinweis)* | – |
+| `true` | nein | nein | „nicht bestellt" (neutral) | – |
+| `true` | nein | ja | „Essen abbestellen?" (orange) | Menü-Popup |
+| `true` | ja | nein | „Kein Essen bestellt" (rot) | `mensa_link` |
+| `true` | ja | ja | „Essen bestellt" (grün) | Menü-Popup |
+
+Klick auf einen **bestellten** Tag öffnet ein natives `ha-dialog` mit Datum, Menütext und Positionen (Menge/Preis). Klick auf einen **nicht bestellten** Tag mit Nachmittagsunterricht öffnet den `mensa_link` (falls gesetzt; sonst der HA-More-Info-Dialog der Entity).
+
+**Datenquelle:** Die Karte erwartet nur HA-`binary_sensor`-Entities mit obigen Attributen — **wie** diese entstehen, ist ihr egal. Lokal typischerweise per MQTT-Discovery; für eine entfernte Instanz (z. B. Teilen mit einer anderen Familie) lassen sich dieselben Entities aus einer öffentlichen JSON per REST-Sensor nachbilden (`state` aus `ordered`, `json_attributes` mit `date`/`menu_text`/`items`/`available`). Die Karte selbst enthält dafür keinen Sonderpfad.
 
 ---
 
