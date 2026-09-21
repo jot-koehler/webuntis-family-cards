@@ -1,6 +1,6 @@
 /* =========================================================================
  * Family School Cards
- * Version: 1.4.0 (2026-09-21) - Aenderungen siehe CHANGELOG.md
+ * Version: 1.5.0 (2026-09-21) - Aenderungen siehe CHANGELOG.md
  * Kompakte Lovelace-Karten fuer Stundenplaene, Hausaufgaben und Klausuren von
  * Kindern in Home Assistant.
  * https://github.com/jot-koehler/webuntis-family-cards
@@ -248,6 +248,9 @@ class FamilyTimetableCard extends HTMLElement {
       // sich exakt wie bisher verhalten (range: rolling).
       range: 'rolling', week_days: 'mo_fr', dim_past: true, highlight_today: true,
       show_nav: true, nav_weeks_ahead: 2, nav_reset_minutes: 10, min_column_width: 132,
+      // Neu ab 1.5.0 (Issue #3): Default true - der Rahmen traegt weiter die
+      // Kalenderfarbe, bestehende Konfigurationen sehen unveraendert aus.
+      accent_border: true,
     }, config);
     this._config.refresh_interval = fscRefreshInterval(this._config.refresh_interval);
     this._config.nav_weeks_ahead = fscClampInt(this._config.nav_weeks_ahead, 0, 8, 2);
@@ -824,10 +827,14 @@ class FamilyTimetableCard extends HTMLElement {
     this.style.setProperty('--fsc-accent', safeColor);
     this.style.setProperty('--fsc-border', fscHexToRgba(safeColor, 0.28));
     this.style.setProperty('--fsc-soft', fscHexToRgba(safeColor, 0.16));
+    // accent_border: false -> Rahmen aus dem Theme statt Kalenderfarbe. Bewusst ein
+    // Attribut am Host und keine gebaute CSS-Zeile: die Regel bleibt im Stylesheet.
+    this.toggleAttribute('plain-border', this._config.accent_border === false);
     const minCol = fscClampInt(this._config.min_column_width, 80, 400, 132);
     const titleHtml = this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : '';
     const style = `<style>
       family-timetable-card ha-card{padding:16px 16px 12px;border:2px solid var(--fsc-border,var(--divider-color))}
+      family-timetable-card[plain-border] ha-card{border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color))}
       family-timetable-card .head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
       family-timetable-card .title{font-size:1.5em;font-weight:500;color:var(--fsc-accent,var(--primary-text-color))}
       family-timetable-card .nav{display:flex;align-items:center;gap:4px;margin-left:auto}
@@ -1104,6 +1111,7 @@ class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
       <div style="display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--divider-color);padding-top:12px;">
         <label style="${chk}"><input id="dim_past" type="checkbox"> Vergangene Stunden ausgrauen</label>
         <label style="${chk}"><input id="highlight_today" type="checkbox"> Heutigen Tag hervorheben</label>
+        <label style="${chk}"><input id="accent_border" type="checkbox"> Kartenrahmen in Kalenderfarbe</label>
       </div>
 
       <div style="display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--divider-color);padding-top:12px;">
@@ -1163,6 +1171,7 @@ class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
     bindNum('nav_reset_minutes', 'nav_reset_minutes', 10);
     bindCheck('dim_past', 'dim_past');
     bindCheck('highlight_today', 'highlight_today');
+    bindCheck('accent_border', 'accent_border');
     bindCheck('show_mensa', 'show_mensa');
     const linkEl = slot.querySelector('#mensa_link');
     linkEl.addEventListener('input', () => { this._config.mensa_link = linkEl.value; this._fireChanged(); });
@@ -1276,6 +1285,7 @@ class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
 
     check('dim_past', c.dim_past !== false);
     check('highlight_today', c.highlight_today !== false);
+    check('accent_border', c.accent_border !== false);
 
     check('show_mensa', !!c.show_mensa);
     show('mensa-cfg', !!c.show_mensa);
@@ -1619,7 +1629,7 @@ class FamilyHomeworkCard extends HTMLElement {
   setConfig(config) {
     this._stopRefreshTimer();
     this._reqSeq = (this._reqSeq || 0) + 1;
-    this._config = Object.assign({ days: 14, refresh_interval: 300, color: '#4fa8e0' }, config);
+    this._config = Object.assign({ days: 14, refresh_interval: 300, color: '#4fa8e0', accent_border: true }, config);
     this._config.refresh_interval = fscRefreshInterval(this._config.refresh_interval);
     this._peopleMode = Array.isArray(this._config.people); // farbcodierte Mehr-Kind-Darstellung
     this._noSource = this._resolveSources().length === 0;
@@ -1703,6 +1713,7 @@ class FamilyHomeworkCard extends HTMLElement {
     const safeColor = fscSafeColor(this._config.color);
     this.style.setProperty('--fsc-accent', safeColor);
     this.style.setProperty('--fsc-border', fscHexToRgba(safeColor, 0.28));
+    this.toggleAttribute('plain-border', this._config.accent_border === false);
     const items = this._items || [];
     const dateFmt = new Intl.DateTimeFormat('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
     // Punkt 7: bei Fehler nicht "Keine Hausaufgaben" vortaeuschen.
@@ -1733,6 +1744,7 @@ class FamilyHomeworkCard extends HTMLElement {
     const partialErr = this._partialError ? '<div class="err">Einige Kalender konnten nicht geladen werden.</div>' : '';
     this.innerHTML = `<ha-card>${this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : ''}<style>
       family-homework-card ha-card{padding:12px 16px;border:2px solid var(--fsc-border,var(--divider-color))}
+      family-homework-card[plain-border] ha-card{border:var(--ha-card-border-width,1px) solid var(--ha-card-border-color,var(--divider-color))}
       family-homework-card .title{font-size:1.2em;font-weight:500;margin-bottom:8px;color:var(--primary-text-color)}
       family-homework-card .item{border-top:1px solid var(--divider-color);padding:9px 2px}
       family-homework-card .item:first-child{border-top:none;padding-top:0}
@@ -1809,6 +1821,7 @@ class FamilyHomeworkCardEditor extends HTMLElement {
           <label style="font-size:14px;color:var(--secondary-text-color);min-width:70px;">Farbe</label>
           <input id="color" type="color" style="width:48px;height:32px;border:none;background:none;cursor:pointer">
         </div>
+        ${this._accentBorderMarkup()}
         <mwc-button id="to-people" outlined>Auf Mehr-Kind-Modus umstellen</mwc-button>
       </div>`;
     const titleEl = this.querySelector('#title');
@@ -1835,6 +1848,7 @@ class FamilyHomeworkCardEditor extends HTMLElement {
     const colorEl = this.querySelector('#color');
     colorEl.value = this._config.color || '#4fa8e0';
     colorEl.addEventListener('input', () => { this._config.color = colorEl.value; this._fireChanged(); });
+    this._bindAccentBorder();
     this.querySelector('#to-people').addEventListener('click', () => this._migrate());
   }
   _syncLegacy() {
@@ -1846,6 +1860,7 @@ class FamilyHomeworkCardEditor extends HTMLElement {
     if (picker) picker.value = this._legacyFirstEntity();
     const colorEl = this.querySelector('#color');
     if (colorEl && document.activeElement !== colorEl) colorEl.value = this._config.color || '#4fa8e0';
+    this._syncAccentBorder();
   }
   _migrate() {
     // Bewusste Migration Legacy -> people (nur auf expliziten Klick): vorhandene Kalender + die
@@ -1876,6 +1891,7 @@ class FamilyHomeworkCardEditor extends HTMLElement {
           <input id="days" type="number" min="1" max="60" style="width:220px;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
         </div>
         <div id="rows" style="display:flex;flex-direction:column;gap:8px;"></div>
+        ${this._accentBorderMarkup()}
         <mwc-button id="add-row" raised>+ Kind hinzufügen</mwc-button>
       </div>`;
     const titleEl = this.querySelector('#title');
@@ -1893,9 +1909,11 @@ class FamilyHomeworkCardEditor extends HTMLElement {
       this._renderRows();
       this._fireChanged();
     });
+    this._bindAccentBorder();
     this._renderRows();
   }
   _syncRows() {
+    this._syncAccentBorder();
     (this._config.people || []).forEach((person, idx) => {
       const refs = this._rowRefs[idx];
       if (!refs) return;
@@ -1960,6 +1978,24 @@ class FamilyHomeworkCardEditor extends HTMLElement {
       container.appendChild(row);
       this._rowRefs.push({ nameEl, picker, colorEl });
     });
+  }
+  // Eine Checkbox, zwei Renderpfade (Legacy und people) - deshalb als Helfer.
+  _accentBorderMarkup() {
+    return `<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--primary-text-color);cursor:pointer;">`
+      + `<input id="accent_border" type="checkbox"> Kartenrahmen in Kalenderfarbe</label>`;
+  }
+  _bindAccentBorder() {
+    const el = this.querySelector('#accent_border');
+    if (!el) return;
+    el.checked = this._config.accent_border !== false;
+    el.addEventListener('change', () => {
+      this._config.accent_border = el.checked;
+      this._fireChanged();
+    });
+  }
+  _syncAccentBorder() {
+    const el = this.querySelector('#accent_border');
+    if (el) el.checked = this._config.accent_border !== false;
   }
   _fireChanged() { fscFireConfigChanged(this, this._config); }
 }

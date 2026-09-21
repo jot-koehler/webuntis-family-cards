@@ -14,6 +14,12 @@ Vertretungen und Sonderveranstaltungen** ein (Heuristik über die
 Einträge schlicht als normale Blöcke gezeigt — voll funktionsfähig, nur ohne
 diese Hervorhebung.
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=jot-koehler&repository=webuntis-family-cards&category=plugin)
+
+Der Badge fügt das Repository direkt als benutzerdefiniertes Repository in
+HACS hinzu (Klick, dann bestätigen) — die Schritte 1 und 2 unter
+[Installation über HACS](#installation-über-hacs) entfallen damit.
+
 Reines Frontend-Plugin (Lovelace-Karten), **keine** Home-Assistant-Integration:
 kein Python, kein Neustart bei Updates, Installation und Updates laufen über
 HACS wie bei jeder anderen Custom Card.
@@ -337,6 +343,7 @@ people:
 | `nav_weeks_ahead` | timetable | Wie viele Wochen nach vorne geblättert werden kann (0–8) | `2` |
 | `nav_reset_minutes` | timetable | Automatischer Rücksprung auf die aktuelle Woche nach Minuten ohne Bedienung, `0` = aus | `10` |
 | `min_column_width` | timetable | Mindestbreite einer Tagesspalte in Pixel; darunter wird die Karte horizontal scrollbar | `132` |
+| `accent_border` | timetable, homework | Kartenrahmen in der Kalenderfarbe. `false` = Rahmen des aktiven Themes (`--ha-card-border-color`/`--ha-card-border-width`), so dass sich die Karte in ein Dashboard-Design einfügt. Titel, Stundenbalken und Tageshervorhebung behalten die Kalenderfarbe. | `true` |
 | `days` | timetable | Nur im Rolling-Modus: Anzahl dargestellter Tage ab heute | `2` |
 | `days` | homework | Vorschau-Zeitraum in Tagen | `14` |
 | `days` | overview | Anzahl dargestellter Tage ab heute | `2` |
@@ -404,3 +411,196 @@ Klick auf einen **bestellten** Tag öffnet ein natives `ha-dialog` mit Datum, Me
 ## Lizenz
 
 MIT, siehe [LICENSE](LICENSE).
+---
+
+# English
+
+## Family School Cards
+
+Four compact Lovelace cards for Home Assistant that put **children's timetables,
+homework and exams** on the dashboard in a readable form.
+
+**Works with any HA calendar entity** — Google Calendar, CalDAV (e.g. iServ),
+ICS/remote calendars, the local HA calendar. The set grew out of a need around
+**WebUntis** (via the
+[`JonasJoKuJonas/homeassistant-WebUntis`](https://github.com/JonasJoKuJonas/homeassistant-WebUntis)
+integration), and WebUntis remains the best supported source: **only there**
+does the timetable card add colour/status markers for **cancelled lessons,
+substitutions, room changes and special events**. With other calendars, entries
+are shown as plain blocks — fully functional, just without that highlighting.
+
+This is a pure frontend plugin (Lovelace cards), **not** a Home Assistant
+integration: no Python, no restart on updates, installed and updated through
+HACS like any other custom card.
+
+### The four cards
+
+| Card | Purpose | For |
+|---|---|---|
+| `family-timetable-card` | Time-grid timetable — either rolling (today + following days) or a fixed calendar week with paging, click-through detail popup, optional canteen hint | one child |
+| `family-overview-card` | Compact "who leaves when" bar overview | several children |
+| `family-homework-card` | Homework list, colour-coded per child, with clickable links | one or several children |
+| `family-exam-card` | Colour-coded exam list, merged chronologically | one or several children |
+
+For several children, place one `family-timetable-card` per child. The other
+three are single cards in which children are added via "+ add child" and told
+apart by colour.
+
+All four cards ship a visual editor (entity picker, colour picker, text
+fields); "Edit in YAML" in the card dialog still works.
+
+### Universal by design
+
+`overview`, `homework` and `exam` are fully calendar-agnostic: they read only
+the standard calendar fields (`start`, `end`, `summary`, `description`,
+`location`) through the HA calendar API. The `timetable` card works with any
+calendar too — the WebUntis status colours are the only WebUntis-specific extra,
+and they simply do not appear with other sources.
+
+### Installation via HACS
+
+Quickest way: use the HACS badge at the top of this README. It adds the
+repository as a custom repository in one click (confirm the dialog), then take
+step 3 below. Manually:
+
+1. HACS → menu (⋮) → Custom repositories.
+2. Repository URL: `https://github.com/jot-koehler/webuntis-family-cards`
+   Category: **Dashboard** (Lovelace plugin).
+3. Install "Family School Cards".
+4. HACS registers the dashboard resource automatically (`hacs.json` with
+   `content_in_root`). Clear the browser cache / hard-reload so the cards show
+   up in the card picker.
+
+Updates then arrive as the usual HACS update badge.
+
+### Minimal configuration
+
+```yaml
+type: custom:family-timetable-card
+title: Child A
+entities:
+  - calendar.webuntis_child_a
+color: "#ff9800"
+days: 2
+
+---
+# The same card as a fixed week view with paging
+type: custom:family-timetable-card
+title: Child A
+entities:
+  - calendar.webuntis_child_a
+color: "#ff9800"
+range: week
+week_days: mo_fr      # or mo_sa, mo_so, or e.g. [1, 3, 5]
+nav_weeks_ahead: 2
+grid_options:
+  columns: full       # five columns need the full width
+
+---
+type: custom:family-homework-card
+title: Homework
+days: 14
+people:
+  - name: Child A
+    entity: calendar.webuntis_child_a_homework
+    color: "#ff9800"
+  - name: Child B
+    entity: calendar.webuntis_child_b_homework
+    color: "#4caf50"
+```
+
+### Configuration options
+
+| Option | Card | Meaning | Default |
+|---|---|---|---|
+| `title` | timetable, homework, exam | Card heading | — |
+| `people` | overview, homework, exam | List of `{name, entity, color}` — one entry per child (colour-coded) | required |
+| `entities` | timetable, homework (legacy) | List of calendar entities (for homework: the classic single-child mode without colour coding) | required |
+| `color` | timetable, homework/overview/exam (per child) | Accent colour (hex) | `#4fa8e0` |
+| `range` | timetable | `rolling` = today + following days, `week` = fixed calendar week | `rolling` |
+| `week_days` | timetable | Week mode only: `mo_fr`, `mo_sa`, `mo_so`, or a list of ISO weekdays (`[1, 3, 5]` = Mon/Wed/Fri). If today is not in the selection, the card shows the coming week. | `mo_fr` |
+| `dim_past` | timetable | Dim past lessons (they stay clickable) | `true` |
+| `highlight_today` | timetable | Mark today with a line in the card colour | `true` |
+| `show_nav` | timetable | Show the paging navigation (week mode only) | `true` |
+| `nav_weeks_ahead` | timetable | How many weeks forward paging may go (0–8) | `2` |
+| `nav_reset_minutes` | timetable | Auto-return to the current week after N minutes without interaction, `0` = off | `10` |
+| `min_column_width` | timetable | Minimum width of a day column in pixels; below that the card scrolls horizontally | `132` |
+| `accent_border` | timetable, homework | Card border in the calendar colour. `false` = the active theme's border (`--ha-card-border-color` / `--ha-card-border-width`), so the card blends into a dashboard design. Title, lesson bars and the today marker keep the calendar colour. | `true` |
+| `days` | timetable | Rolling mode only: number of days shown from today | `2` |
+| `days` | homework | Look-ahead window in days | `14` |
+| `days` | overview | Number of days shown from today | `2` |
+| `days` | exam | Look-ahead window in days | `60` |
+| `max_items` | exam | Maximum number of entries in the merged list | `5` |
+| `skip_weekends` | timetable (rolling mode only), overview | Skip Saturday/Sunday | `true` |
+| `show_mensa` | timetable | Show the canteen hint | `false` |
+| `mensa_entities` | timetable | List of `binary_sensor.*` (on = ordered). Mapped to a day by the `date` attribute (`YYYY-MM-DD`) — order and count do not matter, up to 16 entities. Past days show no hint. Sensors without `date` are mapped by position (legacy, **rolling mode only**). | — |
+| `mensa_link` | timetable | Optional ordering link. Clicking a day that is **not** ordered (red) opens it. | — |
+| `afternoon_threshold` | timetable | From this time of day a day counts as an afternoon-school day (= a meal is needed) | `13:00` |
+| `refresh_interval` | all | Seconds between calendar refetches | `300` |
+
+### Using it with WebUntis
+
+Two integration options matter, and without them the card is missing data
+rather than displaying it differently. Per child, in the options flow of the
+integration entry (⋮ → **Configure**):
+
+1. **Step "Calendar"** → enable `calendar_show_cancelled_lessons`. Without it
+   the integration never sends cancelled lessons to the calendar — they are
+   absent rather than marked.
+2. **Step "Filter"** → enable `invalid_subjects` ("Allow lessons without
+   subjects"). Special events such as a first-day assembly have no subject in
+   WebUntis; without this option the integration silently drops every lesson
+   without a subject. This is the usual reason such entries "just aren't there".
+3. **Step "Calendar"** → enable `calendar_show_room_change`. Only then does the
+   integration emit the `Room change:` prefix the card uses to detect a room
+   change.
+4. **Step "Calendar"** → set `calendar_description` to **JSON** (recommended).
+   The card then reads `code`, `subjects`, `klassen` and `original_rooms`
+   instead of guessing the status from prefixes, and the detail popup can also
+   show the class group, the room change (old → new) and the substitution text.
+   Everything still works without it, just via the heuristic.
+
+Reloading the integration usually suffices; if the effect does not show,
+restart Home Assistant once.
+
+**Side effect of `invalid_subjects`:** *all* subject-less entries appear, not
+only the special events you want. In practice this has been unproblematic, but
+with unusual timetables it is worth a look.
+
+### How the card detects cancelled / changed / moved / special
+
+The card has two paths. The first works with **any** calendar: it reads the
+`Cancelled:`, `Irregular:` and `Room change:` prefixes in `summary`. The second
+is an optional enrichment for WebUntis: if `description` contains JSON, the
+card uses `code`, `subjects`, `klassen` and `original_rooms` as an authoritative
+source. Note that WebUntis delivers the string `"None"` — not a JSON `null` —
+for a lesson with no status code.
+
+Do not use `calendar_replace_name` to strip those prefixes; the card needs them
+whenever the JSON option is off.
+
+### Known limitations
+
+- Without the JSON option, the special/changed distinction is a heuristic and
+  can be wrong with unusual data.
+- **Pure teacher changes cannot be detected.** A WebUntis parent account
+  normally has no read permission for teachers (`getTeachers()`), so the
+  integration supplies no teacher fields — not even in the JSON. A lesson where
+  only the teacher changes therefore looks like an ordinary lesson, even though
+  the WebUntis interface marks it as changed.
+- **How far the week view reaches** is decided by the integration: its data
+  window runs from Monday of the current week to today + 30 days. There is
+  nothing further back, and nothing beyond that point no matter what
+  `nav_weeks_ahead` says.
+- For merged double lessons the JSON in `description` describes only the first
+  single lesson. The card therefore takes start and end times from the calendar
+  event alone.
+- No drag & drop to reorder children in the editors (overview/homework/exam) —
+  rows keep the order in which they were added.
+- No mobile preview in the editor. The layout is optimised for phone use
+  (compact height), but inside the editor it is only visible as the live card
+  below the form, as with any Lovelace card.
+
+### License
+
+MIT, see [LICENSE](LICENSE).

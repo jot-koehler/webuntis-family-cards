@@ -3,6 +3,32 @@
 Alle nennenswerten Änderungen an **Family School Cards**.
 Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/); Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [1.5.0] – 2026-09-21
+
+### Neu
+
+- **Kartenrahmen abschaltbar** (`accent_border`, Default `true`) für
+  `family-timetable-card` und `family-homework-card`. Mit `accent_border: false`
+  nutzt die Karte den Rahmen des aktiven Themes
+  (`--ha-card-border-width` / `--ha-card-border-color`) statt der Kalenderfarbe
+  und fügt sich damit in Dashboards ein, in denen der farbige Rahmen zu stark
+  wirkt — ohne `card-mod`. Titel, Stundenbalken und die Hervorhebung des
+  heutigen Tages behalten die Kalenderfarbe. Die Option steht auch im visuellen
+  Editor beider Karten.
+  Umgesetzt als Attribut am Host plus zweiter CSS-Regel, nicht als zur Laufzeit
+  zusammengesetzte Stilzeile — die Rahmenregel bleibt im Stylesheet.
+  Vorgeschlagen von [@masyfil](https://github.com/masyfil) in
+  [#3](https://github.com/jot-koehler/webuntis-family-cards/issues/3).
+
+### Behoben
+
+- Testsuite: die Prüfungen zum Ausgrauen vergangener Stunden bauten ihre
+  Zeitstempel mit fest kodiertem `+02:00`, ermittelten „heute" aber aus der
+  lokalen Uhr. Auf einem Runner in UTC fiel die 00:01-Stunde dadurch auf den
+  Vortag und drei Prüfungen schlugen fehl. Betroffen war nur der Test, nicht die
+  Karte. Die Stempel werden jetzt ohne Zonenangabe gebaut und laufen in jeder
+  Zeitzone.
+
 ## [1.4.0] – 2026-09-21
 
 Die `family-timetable-card` bekommt eine **feste Wochenansicht** mit Blättern,
