@@ -3,9 +3,13 @@
 Alle nennenswerten Änderungen an **Family School Cards**.
 Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/); Versionierung nach [SemVer](https://semver.org/lang/de/).
 
-## [1.3.1] – 2026-09-21
+## [1.3.2] – 2026-09-21
 
 Bugfix-Release. Keine Konfigurationsänderungen nötig.
+
+> **Hinweis zu 1.3.1:** Das Release 1.3.1 wurde versehentlich auf dem Commit von
+> 1.3.0 getaggt und enthält den unten beschriebenen Fix **nicht**. Es ist inhaltlich
+> mit 1.3.0 identisch. Bitte 1.3.2 verwenden.
 
 ### Behoben
 - **`family-overview-card`: „Jetzt"-Markierung stand zu weit links.** Die Linie liegt

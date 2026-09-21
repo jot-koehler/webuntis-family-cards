@@ -1,5 +1,6 @@
 /* =========================================================================
  * Family School Cards
+ * Version: 1.3.2 (2026-09-21) - Aenderungen siehe CHANGELOG.md
  * Kompakte Lovelace-Karten fuer Stundenplaene, Hausaufgaben und Klausuren von
  * Kindern in Home Assistant.
  * https://github.com/jot-koehler/webuntis-family-cards
