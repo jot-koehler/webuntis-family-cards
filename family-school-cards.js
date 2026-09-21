@@ -1,6 +1,6 @@
 /* =========================================================================
  * Family School Cards
- * Version: 1.3.2 (2026-09-21) - Aenderungen siehe CHANGELOG.md
+ * Version: 1.4.0 (2026-09-21) - Aenderungen siehe CHANGELOG.md
  * Kompakte Lovelace-Karten fuer Stundenplaene, Hausaufgaben und Klausuren von
  * Kindern in Home Assistant.
  * https://github.com/jot-koehler/webuntis-family-cards
@@ -140,6 +140,72 @@ function fscSourcePlaceholder() {
   return '<ha-card style="padding:16px"><div style="font-size:13px;color:var(--secondary-text-color)">Bitte eine Kalender-Entity auswählen.</div></ha-card>';
 }
 
+/* ---------- Wochenansicht: Datums- und Formathilfen ---------- */
+
+/* ISO-Wochentag: 1 = Montag ... 7 = Sonntag (getDay() liefert 0 fuer Sonntag). */
+function fscIsoDow(d) { const g = d.getDay(); return g === 0 ? 7 : g; }
+
+/* Montag 00:00 der Woche, in der d liegt. */
+function fscMondayOf(d) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() - (fscIsoDow(x) - 1));
+  return x;
+}
+
+function fscAddDays(d, n) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+/* week_days normalisieren: Preset-Kuerzel oder Array von ISO-Wochentagen.
+ * Nicht zusammenhaengende Auswahlen (z.B. [1,3,5]) sind zulaessig - die
+ * Tagesspalten werden ohnehin unabhaengig voneinander gerendert. */
+function fscWeekDayList(value) {
+  const presets = {
+    mo_fr: [1, 2, 3, 4, 5],
+    mo_sa: [1, 2, 3, 4, 5, 6],
+    mo_so: [1, 2, 3, 4, 5, 6, 7],
+  };
+  if (Array.isArray(value)) {
+    const nums = value.map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= 7);
+    const uniq = Array.from(new Set(nums)).sort((a, b) => a - b);
+    return uniq.length ? uniq : presets.mo_fr;
+  }
+  const key = String(value == null ? '' : value).trim().toLowerCase();
+  return presets[key] || presets.mo_fr;
+}
+
+/* Tage einer Woche (Montag als Anker), gefiltert auf die gewaehlten Wochentage. */
+function fscWeekDates(monday, weekdays) {
+  return weekdays.map((n) => fscAddDays(monday, n - 1));
+}
+
+/* Ganzzahl mit Ober- und Untergrenze; ungueltige Werte fallen auf fallback. */
+function fscClampInt(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+/* Raumliste aus dem WebUntis-JSON lesbar machen (long_name bevorzugt). */
+function fscRoomLabel(list) {
+  if (!Array.isArray(list) || !list.length) return '';
+  return list
+    .map((r) => String((r && (r.long_name || r.name)) || '').trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
+/* Klassenliste als Kurznamen. */
+function fscKlassenLabel(list) {
+  if (!Array.isArray(list) || !list.length) return '';
+  return list
+    .map((k) => String((k && (k.name || k.long_name)) || '').trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
 /* =========================================================================
  * family-timetable-card
  * Zeitraster-Stundenplan (mehrere Tage auf gemeinsamer Zeitachse) fuer EIN Kind.
@@ -160,6 +226,8 @@ class FamilyTimetableCard extends HTMLElement {
     return document.createElement('family-timetable-card-editor');
   }
   static getStubConfig(hass) {
+    // Bewusst der bisherige Default: neue Karten starten im Rolling-Modus,
+    // damit sich fuer Bestandsnutzer nichts aendert.
     const entity = fscPickCalendar(hass, { avoid: /(hausaufgab|pruef|pruf|klausur|exam)/i });
     return { title: '', entities: entity ? [entity] : [], color: '#4fa8e0', days: 2 };
   }
@@ -172,15 +240,24 @@ class FamilyTimetableCard extends HTMLElement {
     this._stopRefreshTimer();
     this._reqSeq = (this._reqSeq || 0) + 1;
     this._config = Object.assign({
+      // Bestand: unveraendert
       days: 2, skip_weekends: true, refresh_interval: 300, pixels_per_hour: 70,
       padding_minutes: 15, fallback_day_start: '07:30', fallback_day_end: '14:00', color: '#4fa8e0',
       afternoon_threshold: '13:00', // Feature Mensa: ab wann Nachmittagsunterricht = Essensbedarf
+      // Neu ab 1.4.0 - Defaults so gewaehlt, dass bestehende Konfigurationen
+      // sich exakt wie bisher verhalten (range: rolling).
+      range: 'rolling', week_days: 'mo_fr', dim_past: true, highlight_today: true,
+      show_nav: true, nav_weeks_ahead: 2, nav_reset_minutes: 10, min_column_width: 132,
     }, config);
     this._config.refresh_interval = fscRefreshInterval(this._config.refresh_interval);
+    this._config.nav_weeks_ahead = fscClampInt(this._config.nav_weeks_ahead, 0, 8, 2);
+    this._config.nav_reset_minutes = fscClampInt(this._config.nav_reset_minutes, 0, 240, 10);
+    this._weekOffset = 0;
     this._noSource = this._resolveEntities().length === 0;
     this._initialized = false;
     this._render();
   }
+  _isWeek() { return String(this._config.range || 'rolling').toLowerCase() === 'week'; }
   set hass(hass) {
     const oldHass = this._hass;
     this._hass = hass;
@@ -206,10 +283,12 @@ class FamilyTimetableCard extends HTMLElement {
   _stopRefreshTimer() {
     if (this._interval) { clearInterval(this._interval); this._interval = null; }
     if (this._nowTimer) { clearInterval(this._nowTimer); this._nowTimer = null; }
+    if (this._navResetTimer) { clearTimeout(this._navResetTimer); this._navResetTimer = null; }
   }
   _startNowTicker() {
-    // "Jetzt"-Linie unabhaengig vom (schweren) Kalender-Refresh aktuell halten: leichtes
-    // Neu-Rendern aus dem Cache (kein API-Aufruf), nur wenn die Karte sichtbar ist.
+    // "Jetzt"-Linie UND das Ausgrauen vergangener Stunden unabhaengig vom (schweren)
+    // Kalender-Refresh aktuell halten: leichtes Neu-Rendern aus dem Cache (kein
+    // API-Aufruf), nur wenn die Karte sichtbar ist.
     if (!this._nowTimer) {
       this._nowTimer = setInterval(() => {
         if (document.visibilityState === 'visible' && this._initialized) this._render();
@@ -231,35 +310,175 @@ class FamilyTimetableCard extends HTMLElement {
     }
     if (this._clickBound) return;
     this._clickBound = true;
-    // Feature: Klick auf einen Eintrag -> Detail-Popup. Delegation am Host, damit der
-    // Listener ueber die innerHTML-Neuaufbauten hinweg bestehen bleibt (einmalig gebunden).
+    // Klick auf einen Eintrag -> Detail-Popup. Delegation am Host, damit der Listener
+    // ueber die innerHTML-Neuaufbauten hinweg bestehen bleibt (einmalig gebunden).
     this.addEventListener('click', (ev) => {
+      const t = ev.target;
+      if (!t || !t.closest) return;
+      const navEl = t.closest('[data-nav]');
+      if (navEl && this.contains(navEl)) { this._onNav(navEl.getAttribute('data-nav')); return; }
       // Mensa-Hinweis mit aufgeloestem Entity -> aktionsabhaengiger Klick (siehe _mensaClick).
       // Der Bestell-Link fuer nicht bestellte Tage (<a href=mensa_link>) traegt KEIN
       // data-entity und wird hier nicht abgefangen, sondern regulaer vom Browser geoeffnet.
-      const hintEl = ev.target && ev.target.closest ? ev.target.closest('.mensa-hint[data-entity]') : null;
+      const hintEl = t.closest('.mensa-hint[data-entity]');
       if (hintEl && this.contains(hintEl)) {
         const entityId = hintEl.getAttribute('data-entity');
         if (entityId) this._mensaClick(entityId);
         return;
       }
-      const el = ev.target && ev.target.closest ? ev.target.closest('.event') : null;
+      const el = t.closest('.event');
       if (!el || !this.contains(el)) return;
-      const di = Number(el.getAttribute('data-di'));
+      const bi = Number(el.getAttribute('data-bi'));
       const ii = Number(el.getAttribute('data-ii'));
-      const bucket = this._buckets && this._buckets[di];
+      const bucket = this._buckets && this._buckets[bi];
       const item = bucket && bucket.items && bucket.items[ii];
       if (item) this._openDetail(item);
     });
-    // Tastaturbedienung fuer den klickbaren Mensa-Hinweis (role=button/tabindex=0).
+    // Tastaturbedienung fuer Navigation und den klickbaren Mensa-Hinweis.
     this.addEventListener('keydown', (ev) => {
       if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
-      const hintEl = ev.target && ev.target.closest ? ev.target.closest('.mensa-hint[data-entity]') : null;
+      const t = ev.target;
+      if (!t || !t.closest) return;
+      const navEl = t.closest('[data-nav]');
+      if (navEl && this.contains(navEl)) { ev.preventDefault(); this._onNav(navEl.getAttribute('data-nav')); return; }
+      const hintEl = t.closest('.mensa-hint[data-entity]');
       if (!hintEl || !this.contains(hintEl)) return;
       ev.preventDefault();
       const entityId = hintEl.getAttribute('data-entity');
       if (entityId) this._mensaClick(entityId);
     });
+  }
+  disconnectedCallback() {
+    this._stopRefreshTimer();
+    if (this._onVisible) { document.removeEventListener('visibilitychange', this._onVisible); this._onVisible = null; }
+    this._reqSeq = (this._reqSeq || 0) + 1;
+    this._initialized = false;
+    if (this._dialog) { this._dialog.open = false; this._dialog.remove(); this._dialog = null; }
+    if (this._mensaDialog) { this._mensaDialog.open = false; this._mensaDialog.remove(); this._mensaDialog = null; }
+  }
+  getCardSize() { return this._isWeek() ? 6 : 5; }
+
+  /* ---------- Wochen-Navigation ---------- */
+
+  _maxOffset() { return this._isWeek() && this._config.show_nav ? this._config.nav_weeks_ahead : 0; }
+  _onNav(action) {
+    const max = this._maxOffset();
+    if (action === 'prev') this._weekOffset = Math.max(0, this._weekOffset - 1);
+    else if (action === 'next') this._weekOffset = Math.min(max, this._weekOffset + 1);
+    else if (action === 'today') this._weekOffset = 0;
+    this._armNavReset();
+    this._render();
+  }
+  // Auto-Rücksprung auf die aktuelle Woche: auf einem Wandtablet soll nach dem
+  // Blaettern nicht dauerhaft eine fremde Woche stehenbleiben.
+  _armNavReset() {
+    if (this._navResetTimer) { clearTimeout(this._navResetTimer); this._navResetTimer = null; }
+    const mins = this._config.nav_reset_minutes;
+    if (!mins || this._weekOffset === 0) return;
+    this._navResetTimer = setTimeout(() => {
+      this._weekOffset = 0;
+      this._navResetTimer = null;
+      this._render();
+    }, mins * 60000);
+  }
+
+  /* ---------- Welche Tage werden angezeigt ---------- */
+
+  // Montag der Woche, die Offset 0 entspricht. Liegt heute nicht in der gewaehlten
+  // Tagesmenge (z.B. Samstag bei Mo-Fr), wird auf die kommende Woche gesprungen,
+  // statt eine vollstaendig vergangene Woche komplett ausgegraut zu zeigen.
+  _baseMonday() {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const weekdays = fscWeekDayList(this._config.week_days);
+    let monday = fscMondayOf(today);
+    if (weekdays.indexOf(fscIsoDow(today)) === -1) monday = fscAddDays(monday, 7);
+    return monday;
+  }
+  // Im Wochenmodus werden ALLE blaetterbaren Wochen auf einmal geholt (Prefetch).
+  // Das Umschalten laeuft dann rein clientseitig - und vor allem koennen
+  // Refresh-Timer und Visibility-Handler den Offset nicht zuruecksetzen.
+  _allDates() {
+    if (!this._isWeek()) return fscDates(this._config.days, this._config.skip_weekends);
+    const weekdays = fscWeekDayList(this._config.week_days);
+    const base = this._baseMonday();
+    const out = [];
+    for (let w = 0; w <= this._maxOffset(); w++) {
+      out.push(...fscWeekDates(fscAddDays(base, w * 7), weekdays));
+    }
+    return out;
+  }
+  // Indizes der aktuell sichtbaren Buckets innerhalb von this._buckets.
+  _visibleRange() {
+    if (!this._isWeek()) return { from: 0, to: (this._buckets || []).length };
+    const per = fscWeekDayList(this._config.week_days).length;
+    const from = this._weekOffset * per;
+    return { from, to: from + per };
+  }
+
+  /* ---------- Mensa ---------- */
+
+  // Zuordnung eines Mensa-binary_sensor zu einem dargestellten Tag: datumsgesteuert
+  // ueber attributes.date (YYYY-MM-DD, lokal normiert - kein toISOString()/UTC-Versatz).
+  // Der Legacy-Positions-Fallback greift bewusst NUR im Rolling-Modus: im Wochenmodus
+  // ist die Position eines Sensors ueber mehrere Wochen hinweg bedeutungslos und
+  // wuerde falsche Tage zuordnen.
+  // Rueckgabe: { entityId, st, source: 'date'|'legacy' } oder null.
+  _resolveMensaEntity(bucket, localIdx) {
+    const entities = this._config.mensa_entities;
+    if (!Array.isArray(entities) || !this._hass || !this._hass.states || !bucket) return null;
+    const wantIso = fscLocalISODate(bucket.date);
+    // 1. Datums-Match. Bei mehreren Entities mit demselben date gilt deterministisch
+    // "first match wins" (Reihenfolge in mensa_entities).
+    for (const id of entities) {
+      if (!id) continue;
+      const st = this._hass.states[id];
+      if (!st || !st.attributes) continue;
+      const dattr = st.attributes.date;
+      if (typeof dattr === 'string' && dattr.trim() === wantIso) {
+        return { entityId: id, st, source: 'date' };
+      }
+    }
+    if (this._isWeek()) return null;
+    // 2. Legacy-Positions-Fallback: nur fuer ein Entity OHNE verwertbares date-Attribut.
+    // Ein Entity mit gueltigem, aber abweichendem Datum wird niemals positionsbasiert genutzt.
+    const legacyId = entities[localIdx];
+    if (legacyId) {
+      const st = this._hass.states[legacyId];
+      if (st && st.attributes) {
+        const dattr = st.attributes.date;
+        const hasValidDate = typeof dattr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dattr.trim());
+        if (!hasValidDate) return { entityId: legacyId, st, source: 'legacy' };
+      }
+    }
+    return null;
+  }
+  // Hinweis-Objekt pro dargestelltem Tag. Liefert null = kein Hinweis rendern.
+  // available=false -> kein Hinweis (Datenluecke, nicht "nichts bestellt"); sonst
+  // vier Zustaende aus (Nachmittagsunterricht ja/nein) x (bestellt ja/nein).
+  _mensaHint(bucket, localIdx) {
+    if (!this._config.show_mensa) return null;
+    if (!bucket) return null;
+    const resolved = this._resolveMensaEntity(bucket, localIdx);
+    if (!resolved) return null; // kein aufloesbares Entity -> kein Hinweis (auch kein Link-Fallback)
+    const st = resolved.st;
+    if (!fscMensaAvailable(st)) return null;
+    // Nur belastbarer Zustand (on/off) - unknown/unavailable = kein Hinweis.
+    if (st.state !== 'on' && st.state !== 'off') return null;
+    const ordered = st.state === 'on';
+    // afternoon_threshold als HH:MM validieren, sonst Default 13:00 (kein 00:00-Fehlwert).
+    const tm = /^(\d{1,2}):(\d{2})$/.exec(String(this._config.afternoon_threshold || '').trim());
+    let thresholdMin = 13 * 60;
+    if (tm) {
+      const ah = Number(tm[1]); const am = Number(tm[2]);
+      if (ah >= 0 && ah <= 23 && am >= 0 && am <= 59) thresholdMin = ah * 60 + am;
+    }
+    const hasAfternoon = bucket.items.some((it) => !it.cancelled && fscMinOfDay(it.start) >= thresholdMin);
+    let text; let cls; let clickable;
+    if (!hasAfternoon && !ordered) { text = 'nicht bestellt'; cls = 'neutral'; clickable = false; }
+    else if (!hasAfternoon && ordered) { text = 'Essen abbestellen?'; cls = 'info'; clickable = true; }
+    else if (hasAfternoon && !ordered) { text = 'Kein Essen bestellt'; cls = 'warn'; clickable = true; }
+    else { text = 'Essen bestellt'; cls = 'ok'; clickable = true; }
+    return { text, cls, clickable, ordered, entityId: resolved.entityId, source: resolved.source };
   }
   // Aktionsabhaengiger Klick auf einen Mensa-Hinweis:
   // - bestellt (state on)  -> eigenes Detail-Popup mit Menuetext/Positionen
@@ -279,6 +498,92 @@ class FamilyTimetableCard extends HTMLElement {
       detail: { entityId }, bubbles: true, composed: true,
     }));
   }
+
+  /* ---------- Dialoge ---------- */
+
+  // Titel NUR ueber die vom Dialog tatsaechlich unterstuetzte Header-API setzen, damit er
+  // nicht doppelt (nativer Header + Body) erscheint. headerTitle ab HA 2026.3
+  // (Web-Awesome-Dialog), heading in aelteren Generationen. Body-Titel nur als Fallback.
+  _dialogTitle(dlg, title) {
+    if ('headerTitle' in dlg) { dlg.headerTitle = title; return ''; }
+    if ('heading' in dlg) { dlg.heading = title; return ''; }
+    return `<div class="fsc-dlg-title">${fscEsc(title)}</div>`;
+  }
+  _dialogStyle() {
+    return `<style>
+        .fsc-dlg-title{font-size:18px;font-weight:600;color:var(--primary-text-color);margin-bottom:12px}
+        .fsc-dlg-row{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--primary-text-color);margin-bottom:8px}
+        .fsc-dlg-row ha-icon{--mdc-icon-size:18px;color:var(--secondary-text-color)}
+        .fsc-dlg-badge{display:inline-block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:3px 8px;border-radius:10px;margin-bottom:10px}
+        .fsc-dlg-badge.changed{background:rgba(224,168,79,0.18);color:#e0a84f}
+        .fsc-dlg-badge.cancelled{background:rgba(224,95,79,0.16);color:#e05f4f}
+        .fsc-dlg-badge.special{background:rgba(230,194,41,0.20);color:#c9a415}
+        .fsc-dlg-badge.moved{background:rgba(155,127,212,0.20);color:#9b7fd4}
+        .fsc-dlg-badge.past{background:rgba(128,128,128,0.18);color:var(--secondary-text-color)}
+        .fsc-dlg-desc{font-size:13px;line-height:1.5;color:var(--primary-text-color);white-space:pre-wrap;margin-top:4px;padding-top:8px;border-top:1px solid var(--divider-color)}
+        .fsc-dlg-actions{display:flex;align-items:center;gap:12px;margin-top:16px}
+        .fsc-dlg-close{font:inherit;font-weight:600;color:var(--primary-color);background:none;border:none;padding:8px 12px;border-radius:6px;cursor:pointer;margin-left:auto}
+        .fsc-dlg-close:hover{background:rgba(var(--rgb-primary-color,79,168,224),0.12)}
+        .fsc-mensa-badge{display:inline-block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:3px 8px;border-radius:10px;margin-bottom:12px;background:rgba(79,176,106,0.18);color:var(--success-color,#4fb06a)}
+        .fsc-mensa-items{display:flex;flex-direction:column;gap:10px}
+        .fsc-mensa-item{border-left:3px solid var(--success-color,#4fb06a);padding-left:10px}
+        .fsc-mensa-line{font-size:12px;color:var(--secondary-text-color);margin-bottom:2px}
+        .fsc-mensa-text{font-size:14px;color:var(--primary-text-color);line-height:1.4}
+        .fsc-mensa-reorder{display:inline-block;font:inherit;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;text-decoration:none;padding:8px 14px;border-radius:8px;background:rgba(224,168,79,0.18);color:var(--warning-color,#e0a84f);border:1px solid rgba(224,168,79,0.45);cursor:pointer}
+        .fsc-mensa-reorder:hover{background:rgba(224,168,79,0.30)}
+      </style>`;
+  }
+  _openDetail(item) {
+    if (!this._dialog) {
+      this._dialog = document.createElement('ha-dialog');
+      this._dialog.addEventListener('closed', () => { if (this._dialog) this._dialog.open = false; });
+      document.body.appendChild(this._dialog);
+    }
+    const dateFmt = new Intl.DateTimeFormat('de-DE', { weekday: 'long', day: 'numeric', month: 'long' });
+    const timeFmt = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' });
+    const isPast = item.end < new Date();
+    const title = item.title || 'Termin';
+    let statusLabel = ''; let statusCls = '';
+    if (item.cancelled) { statusLabel = 'Entfallen'; statusCls = 'cancelled'; }
+    else if (item.special) { statusLabel = 'Sonderveranstaltung'; statusCls = 'special'; }
+    else if (item.changed) { statusLabel = 'Änderung / Vertretung'; statusCls = 'changed'; }
+    else if (item.moved) { statusLabel = 'Raumwechsel'; statusCls = 'moved'; }
+    else if (isPast) { statusLabel = 'Bereits vorbei'; statusCls = 'past'; }
+    const statusHtml = statusLabel ? `<div class="fsc-dlg-badge ${statusCls}">${fscEsc(statusLabel)}</div>` : '';
+    // Raumzeile: bei einem Wechsel alt -> neu, bei ersatzlosem Wegfall "entfällt".
+    const oldRoom = fscRoomLabel(item.originalRooms);
+    const newRoom = fscRoomLabel(item.rooms) || item.location;
+    const roomHtml = oldRoom
+      ? `<div class="fsc-dlg-row"><ha-icon icon="mdi:map-marker-right"></ha-icon>${fscEsc(oldRoom)} → ${fscEsc(newRoom || 'entfällt')}</div>`
+      : (item.location ? `<div class="fsc-dlg-row"><ha-icon icon="mdi:map-marker-outline"></ha-icon>${fscEsc(item.location)}</div>` : '');
+    const klassenLabel = fscKlassenLabel(item.klassen);
+    const klassenHtml = klassenLabel
+      ? `<div class="fsc-dlg-row"><ha-icon icon="mdi:account-group-outline"></ha-icon>${fscEsc(klassenLabel)}</div>`
+      : '';
+    // Hinweistext bevorzugt aus dem JSON (info/lstext/substText), sonst die rohe
+    // Beschreibung. Rohes JSON landet hier nie - es wird beim Parsen geleert.
+    const noteText = item.note || item.description || '';
+    const descHtml = noteText ? `<div class="fsc-dlg-desc">${fscEsc(noteText).replace(/\n/g, '<br>')}</div>` : '';
+    const fallbackTitleHtml = this._dialogTitle(this._dialog, title);
+    // Schliessen ueber einen eigenen Button mit explizitem open=false statt ueber einen
+    // HA-internen Action-Slot (primaryAction/dialogAction), der sich zwischen den
+    // Dialog-Generationen unterscheidet - so bleibt die Kernfunktion API-unabhaengig.
+    this._dialog.innerHTML = `${this._dialogStyle()}
+      <div style="padding:4px 4px 8px;min-width:240px;">
+        ${fallbackTitleHtml}
+        ${statusHtml}
+        <div class="fsc-dlg-row"><ha-icon icon="mdi:calendar-outline"></ha-icon>${fscEsc(dateFmt.format(item.start))}</div>
+        <div class="fsc-dlg-row"><ha-icon icon="mdi:clock-outline"></ha-icon>${timeFmt.format(item.start)}–${timeFmt.format(item.end)}</div>
+        ${roomHtml}
+        ${klassenHtml}
+        ${descHtml}
+        <div class="fsc-dlg-actions"><button type="button" class="fsc-dlg-close">Schließen</button></div>
+      </div>
+    `;
+    const closeBtn = this._dialog.querySelector('.fsc-dlg-close');
+    if (closeBtn) closeBtn.addEventListener('click', () => { this._dialog.open = false; });
+    this._dialog.open = true;
+  }
   _openMensaDetail(st) {
     // Eigenes Mensa-Detail im gleichen ha-dialog-Stil wie _openDetail (Termine),
     // aber eigener Dialog (this._mensaDialog), damit sich beide nicht ins Gehege kommen.
@@ -295,13 +600,7 @@ class FamilyTimetableCard extends HTMLElement {
       const d = new Date(Number(dm[1]), Number(dm[2]) - 1, Number(dm[3]));
       dateLabel = new Intl.DateTimeFormat('de-DE', { weekday: 'long', day: 'numeric', month: 'long' }).format(d);
     }
-    const title = dateLabel ? `Mensa – ${dateLabel}` : 'Mensa';
-    const hasHeaderTitle = ('headerTitle' in this._mensaDialog);
-    const hasHeading = ('heading' in this._mensaDialog);
-    let fallbackTitleHtml = '';
-    if (hasHeaderTitle) { this._mensaDialog.headerTitle = title; }
-    else if (hasHeading) { this._mensaDialog.heading = title; }
-    else { fallbackTitleHtml = `<div class="fsc-dlg-title">${fscEsc(title)}</div>`; }
+    const fallbackTitleHtml = this._dialogTitle(this._mensaDialog, dateLabel ? `Mensa – ${dateLabel}` : 'Mensa');
     // Positionen (items) bevorzugt als Liste mit Linie/Text/Menge/Preis; sonst menu_text;
     // sonst neutraler Hinweis. Preise nur zeigen, wenn vorhanden.
     const items = Array.isArray(a.items) ? a.items : [];
@@ -321,26 +620,11 @@ class FamilyTimetableCard extends HTMLElement {
       bodyHtml = '<div class="fsc-mensa-text" style="color:var(--secondary-text-color)">Bestellt – kein Menütext hinterlegt.</div>';
     }
     // Optionaler "Umbestellen"-Button -> oeffnet den Bestell-Link (nur wenn gesetzt).
-    // Stil analog zum "Essen bestellt"-Badge: getoenter Hintergrund + farbiger Text,
-    // gedecktes Gelb/Amber (--warning-color).
     const orderLink = (this._config && this._config.mensa_link) ? String(this._config.mensa_link) : '';
     const reorderHtml = orderLink
       ? `<a class="fsc-mensa-reorder" href="${fscEsc(orderLink)}" target="_blank" rel="noopener noreferrer">Umbestellen</a>`
       : '';
-    this._mensaDialog.innerHTML = `
-      <style>
-        .fsc-dlg-title{font-size:18px;font-weight:600;color:var(--primary-text-color);margin-bottom:12px}
-        .fsc-mensa-badge{display:inline-block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:3px 8px;border-radius:10px;margin-bottom:12px;background:rgba(79,176,106,0.18);color:var(--success-color,#4fb06a)}
-        .fsc-mensa-items{display:flex;flex-direction:column;gap:10px}
-        .fsc-mensa-item{border-left:3px solid var(--success-color,#4fb06a);padding-left:10px}
-        .fsc-mensa-line{font-size:12px;color:var(--secondary-text-color);margin-bottom:2px}
-        .fsc-mensa-text{font-size:14px;color:var(--primary-text-color);line-height:1.4}
-        .fsc-dlg-actions{display:flex;align-items:center;gap:12px;margin-top:16px}
-        .fsc-mensa-reorder{display:inline-block;font:inherit;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;text-decoration:none;padding:8px 14px;border-radius:8px;background:rgba(224,168,79,0.18);color:var(--warning-color,#e0a84f);border:1px solid rgba(224,168,79,0.45);cursor:pointer}
-        .fsc-mensa-reorder:hover{background:rgba(224,168,79,0.30)}
-        .fsc-dlg-close{font:inherit;font-weight:600;color:var(--primary-color);background:none;border:none;padding:8px 12px;border-radius:6px;cursor:pointer;margin-left:auto}
-        .fsc-dlg-close:hover{background:rgba(var(--rgb-primary-color,79,168,224),0.12)}
-      </style>
+    this._mensaDialog.innerHTML = `${this._dialogStyle()}
       <div style="padding:4px 4px 8px;min-width:240px;">
         ${fallbackTitleHtml}
         <div class="fsc-mensa-badge">Essen bestellt</div>
@@ -352,138 +636,9 @@ class FamilyTimetableCard extends HTMLElement {
     if (closeBtn) closeBtn.addEventListener('click', () => { this._mensaDialog.open = false; });
     this._mensaDialog.open = true;
   }
-  disconnectedCallback() {
-    this._stopRefreshTimer();
-    if (this._onVisible) { document.removeEventListener('visibilitychange', this._onVisible); this._onVisible = null; }
-    this._reqSeq = (this._reqSeq || 0) + 1;
-    this._initialized = false;
-    if (this._dialog) { this._dialog.open = false; this._dialog.remove(); this._dialog = null; }
-    if (this._mensaDialog) { this._mensaDialog.open = false; this._mensaDialog.remove(); this._mensaDialog = null; }
-  }
-  _openDetail(item) {
-    if (!this._dialog) {
-      this._dialog = document.createElement('ha-dialog');
-      this._dialog.addEventListener('closed', () => { if (this._dialog) this._dialog.open = false; });
-      document.body.appendChild(this._dialog);
-    }
-    const dateFmt = new Intl.DateTimeFormat('de-DE', { weekday: 'long', day: 'numeric', month: 'long' });
-    const timeFmt = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' });
-    const title = item.title || 'Termin';
-    const statusLabel = item.cancelled ? 'Entfallen' : (item.special ? 'Sonderveranstaltung' : (item.changed ? 'Änderung / Vertretung' : ''));
-    const statusCls = item.cancelled ? 'cancelled' : (item.special ? 'special' : (item.changed ? 'changed' : ''));
-    const statusHtml = statusLabel ? `<div class="fsc-dlg-badge ${statusCls}">${fscEsc(statusLabel)}</div>` : '';
-    const roomHtml = item.location ? `<div class="fsc-dlg-row"><ha-icon icon="mdi:map-marker-outline"></ha-icon>${fscEsc(item.location)}</div>` : '';
-    const descHtml = item.description ? `<div class="fsc-dlg-desc">${fscEsc(item.description).replace(/\n/g, '<br>')}</div>` : '';
-    // Punkt 2 (korrigiert): Titel NUR ueber die vom Dialog tatsaechlich unterstuetzte Header-API
-    // setzen, damit er nicht doppelt (nativer Header + Body) erscheint. headerTitle ab HA 2026.3
-    // (Web-Awesome-Dialog), heading in aelteren Generationen. Body-Titel nur als Fallback, wenn
-    // KEINE Header-API existiert.
-    const hasHeaderTitle = ('headerTitle' in this._dialog);
-    const hasHeading = ('heading' in this._dialog);
-    let fallbackTitleHtml = '';
-    if (hasHeaderTitle) { this._dialog.headerTitle = title; }
-    else if (hasHeading) { this._dialog.heading = title; }
-    else { fallbackTitleHtml = `<div class="fsc-dlg-title">${fscEsc(title)}</div>`; }
-    // Schliessen ueber einen eigenen Button mit explizitem open=false statt ueber einen
-    // HA-internen Action-Slot (primaryAction/dialogAction), der sich zwischen den
-    // Dialog-Generationen unterscheidet - so bleibt die Kernfunktion API-unabhaengig.
-    this._dialog.innerHTML = `
-      <style>
-        .fsc-dlg-title{font-size:18px;font-weight:600;color:var(--primary-text-color);margin-bottom:12px}
-        .fsc-dlg-row{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--primary-text-color);margin-bottom:8px}
-        .fsc-dlg-row ha-icon{--mdc-icon-size:18px;color:var(--secondary-text-color)}
-        .fsc-dlg-badge{display:inline-block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:3px 8px;border-radius:10px;margin-bottom:10px}
-        .fsc-dlg-badge.changed{background:rgba(224,168,79,0.18);color:#e0a84f}
-        .fsc-dlg-badge.cancelled{background:rgba(224,95,79,0.16);color:#e05f4f}
-        .fsc-dlg-badge.special{background:rgba(230,194,41,0.20);color:#c9a415}
-        .fsc-dlg-desc{font-size:13px;line-height:1.5;color:var(--primary-text-color);white-space:pre-wrap;margin-top:4px;padding-top:8px;border-top:1px solid var(--divider-color)}
-        .fsc-dlg-actions{display:flex;justify-content:flex-end;margin-top:14px}
-        .fsc-dlg-close{font:inherit;font-weight:600;color:var(--primary-color);background:none;border:none;padding:8px 12px;border-radius:6px;cursor:pointer}
-        .fsc-dlg-close:hover{background:rgba(var(--rgb-primary-color,79,168,224),0.12)}
-      </style>
-      <div style="padding:4px 4px 8px;min-width:240px;">
-        ${fallbackTitleHtml}
-        ${statusHtml}
-        <div class="fsc-dlg-row"><ha-icon icon="mdi:calendar-outline"></ha-icon>${fscEsc(dateFmt.format(item.start))}</div>
-        <div class="fsc-dlg-row"><ha-icon icon="mdi:clock-outline"></ha-icon>${timeFmt.format(item.start)}–${timeFmt.format(item.end)}</div>
-        ${roomHtml}
-        ${descHtml}
-        <div class="fsc-dlg-actions"><button type="button" class="fsc-dlg-close">Schließen</button></div>
-      </div>
-    `;
-    const closeBtn = this._dialog.querySelector('.fsc-dlg-close');
-    if (closeBtn) closeBtn.addEventListener('click', () => { this._dialog.open = false; });
-    this._dialog.open = true;
-  }
-  // Feature Mensa: Zuordnung eines Mensa-binary_sensor zu einem dargestellten Tag.
-  // NEU (v1.3): datumsgesteuert statt positionsbasiert. Zuerst wird unter allen
-  // konfigurierten mensa_entities eines gesucht, dessen attributes.date exakt dem
-  // (lokalen) Bucket-Datum entspricht. Erst wenn kein Datums-Treffer existiert, greift
-  // der Legacy-Positions-Fallback mensa_entities[bucketIdx] - und das AUCH nur, wenn das
-  // Entity an dieser Position gar KEIN gueltiges date-Attribut besitzt (echte Alt-Config).
-  // Ein Entity mit gueltigem, aber abweichendem Datum wird niemals positionsbasiert genutzt.
-  // Rueckgabe: { entityId, st, source: 'date'|'legacy' } oder null.
-  _resolveMensaEntity(bucket, bucketIdx) {
-    const entities = this._config.mensa_entities;
-    if (!Array.isArray(entities) || !this._hass || !this._hass.states || !bucket) return null;
-    const wantIso = fscLocalISODate(bucket.date);
-    // 1. Datums-Match (ausschliesslich normiertes lokales YYYY-MM-DD, kein toISOString()).
-    // Bei mehreren Entities mit demselben date gilt deterministisch "first match wins"
-    // (Reihenfolge in mensa_entities) - bewusst keine weitere Konfliktlogik.
-    for (const id of entities) {
-      if (!id) continue;
-      const st = this._hass.states[id];
-      if (!st || !st.attributes) continue;
-      const dattr = st.attributes.date;
-      if (typeof dattr === 'string' && dattr.trim() === wantIso) {
-        return { entityId: id, st, source: 'date' };
-      }
-    }
-    // 2. Legacy-Positions-Fallback: nur fuer ein Entity OHNE verwertbares date-Attribut.
-    const legacyId = entities[bucketIdx];
-    if (legacyId) {
-      const st = this._hass.states[legacyId];
-      if (st && st.attributes) {
-        const dattr = st.attributes.date;
-        const hasValidDate = typeof dattr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dattr.trim());
-        // hasValidDate === true bedeutet: Datum vorhanden, hat aber (s.o.) nicht gematcht
-        //   -> abweichender gueltiger Tag -> NICHT positionsbasiert verwenden.
-        if (!hasValidDate) return { entityId: legacyId, st, source: 'legacy' };
-      }
-    }
-    return null;
-  }
-  // Hinweis-Objekt pro dargestelltem Tag. Liefert null = kein Hinweis rendern.
-  // Vollstaendige Falllogik (siehe README): available=false -> kein Hinweis; sonst
-  // vier Zustaende aus (Nachmittagsunterricht ja/nein) x (bestellt ja/nein).
-  _mensaHint(bucketIdx) {
-    if (!this._config.show_mensa) return null;
-    const b = this._buckets && this._buckets[bucketIdx];
-    if (!b) return null;
-    const resolved = this._resolveMensaEntity(b, bucketIdx);
-    if (!resolved) return null; // kein aufloesbares Entity -> kein Hinweis (auch kein Link-Fallback)
-    const st = resolved.st;
-    // available=false -> ueberhaupt kein Hinweis (Datenluecke, nicht "nichts bestellt").
-    if (!fscMensaAvailable(st)) return null;
-    // Nur belastbarer Zustand (on/off) - unknown/unavailable = kein Hinweis.
-    if (st.state !== 'on' && st.state !== 'off') return null;
-    const ordered = st.state === 'on';
-    // afternoon_threshold als HH:MM validieren, sonst Default 13:00 (kein 00:00-Fehlwert).
-    const tm = /^(\d{1,2}):(\d{2})$/.exec(String(this._config.afternoon_threshold || '').trim());
-    let thresholdMin = 13 * 60;
-    if (tm) {
-      const ah = Number(tm[1]); const am = Number(tm[2]);
-      if (ah >= 0 && ah <= 23 && am >= 0 && am <= 59) thresholdMin = ah * 60 + am;
-    }
-    const hasAfternoon = b.items.some((it) => !it.cancelled && fscMinOfDay(it.start) >= thresholdMin);
-    let text; let cls; let clickable;
-    if (!hasAfternoon && !ordered) { text = 'nicht bestellt'; cls = 'neutral'; clickable = false; }
-    else if (!hasAfternoon && ordered) { text = 'Essen abbestellen?'; cls = 'info'; clickable = true; }
-    else if (hasAfternoon && !ordered) { text = 'Kein Essen bestellt'; cls = 'warn'; clickable = true; }
-    else { text = 'Essen bestellt'; cls = 'ok'; clickable = true; }
-    return { text, cls, clickable, ordered, entityId: resolved.entityId, source: resolved.source };
-  }
-  getCardSize() { return 5; }
+
+  /* ---------- Layout ---------- */
+
   _layoutColumns(items) {
     const n = items.length;
     const assigned = new Array(n);
@@ -510,18 +665,40 @@ class FamilyTimetableCard extends HTMLElement {
     flush();
     return assigned;
   }
+  // Zeitachse NUR ueber die sichtbaren Tage berechnen - sonst zieht ein einzelner
+  // Abendtermin in einer anderen Woche das Raster der aktuellen Woche auseinander.
+  _axisFor(visible) {
+    let minStart = null, maxEnd = null;
+    for (const b of visible) for (const it of b.items) {
+      const s = fscMinOfDay(it.start), e = fscMinOfDay(it.end);
+      if (minStart === null || s < minStart) minStart = s;
+      if (maxEnd === null || e > maxEnd) maxEnd = e;
+    }
+    const hasAny = minStart !== null;
+    const [fsh, fsm] = String(this._config.fallback_day_start || '07:30').split(':').map(Number);
+    const [feh, fem] = String(this._config.fallback_day_end || '14:00').split(':').map(Number);
+    if (minStart === null) minStart = (fsh || 7) * 60 + (fsm || 30);
+    if (maxEnd === null) maxEnd = (feh || 14) * 60 + (fem || 0);
+    const pad = Number(this._config.padding_minutes) || 0;
+    minStart = Math.max(0, Math.floor((minStart - pad) / 5) * 5);
+    maxEnd = Math.min(24 * 60, Math.ceil((maxEnd + pad) / 5) * 5);
+    return { minStart, maxEnd, hasAny };
+  }
+
+  /* ---------- Daten holen ---------- */
+
   async _fetchAndRender() {
     if (!this._hass) return;
     const myReq = ++this._reqSeq;
     const entities = this._resolveEntities();
     if (!entities.length) {
-      this._noSource = true; this._buckets = null; this._hasAnyEvents = false; this._lastError = false; this._partialError = false;
+      this._noSource = true; this._buckets = null; this._lastError = false; this._partialError = false;
       this._lastFetch = Date.now();
       this._render();
       return;
     }
     this._noSource = false;
-    const dates = fscDates(this._config.days, this._config.skip_weekends); if (!dates.length) return;
+    const dates = this._allDates(); if (!dates.length) return;
     const rangeStart = new Date(dates[0]); rangeStart.setHours(-6, 0, 0, 0);
     const rangeEnd = new Date(dates[dates.length - 1]); rangeEnd.setHours(30, 0, 0, 0);
     const startISO = rangeStart.toISOString(); const endISO = rangeEnd.toISOString();
@@ -531,7 +708,7 @@ class FamilyTimetableCard extends HTMLElement {
         return { entityId, events: events || [] };
       } catch (e) { console.error('family-timetable-card:', entityId, e); return { entityId, events: [], error: true }; }
     }));
-    if (myReq !== this._reqSeq) return; // Punkt 2: veralteter Request (Config-Wechsel, Disconnect, ueberholter Refresh)
+    if (myReq !== this._reqSeq) return; // veralteter Request (Config-Wechsel, Disconnect, ueberholter Refresh)
     const buckets = dates.map((d) => ({ date: d, items: [] }));
     const seen = new Set();
     for (const src of perEntity) {
@@ -539,37 +716,72 @@ class FamilyTimetableCard extends HTMLElement {
         if (!ev.start || !ev.start.dateTime) continue;
         const start = new Date(ev.start.dateTime);
         const end = new Date((ev.end && ev.end.dateTime) || ev.start.dateTime);
-        const key = start.toISOString() + '|' + end.toISOString() + '|' + (ev.summary || '') + '|' + (ev.location || '');
-        if (seen.has(key)) continue; seen.add(key);
-        const bucket = buckets.find((b) => fscSameDay(b.date, start)); if (!bucket) continue;
-        let title = ev.summary || ''; let changed = false; let cancelled = false;
-        let m = title.match(/^Irregular:\s*/i);
-        if (m) { changed = true; title = title.slice(m[0].length); }
+        const bucket = buckets.find((b) => fscSameDay(b.date, start));
+        if (!bucket) continue;
+
+        // Praefix-Heuristik als Basis: sie funktioniert mit JEDEM Kalender (Google,
+        // CalDAV, ICS). Reihenfolge wie in der WebUntis-Integration: "Cancelled:" und
+        // "Irregular:" ueberschreiben ein "Room change:" - ein Eintrag traegt daher
+        // nie zwei Marker gleichzeitig.
+        let title = ev.summary || '';
+        let changed = false; let cancelled = false; let moved = false;
+        let m = title.match(/^Room change:\s*/i);
+        if (m) { moved = true; title = title.slice(m[0].length); }
+        m = title.match(/^Irregular:\s*/i);
+        if (m) { changed = true; moved = false; title = title.slice(m[0].length); }
         m = title.match(/^Cancelled:\s*/i);
-        if (m) { cancelled = true; title = title.slice(m[0].length); }
+        if (m) { cancelled = true; changed = false; moved = false; title = title.slice(m[0].length); }
         // Punkt 11: leere und reine Whitespace-Raumangaben gelten als "kein Raum".
         const location = String(ev.location || '').trim();
-        const special = changed && !location;
-        bucket.items.push({ start, end, title, location, changed, cancelled, special, description: String(ev.description || '') });
+        let special = changed && !location;
+
+        // Anreicherung (optional): Steht in der Beschreibung ein JSON, ist das die
+        // verlaessliche Quelle. WebUntis liefert es mit der Integrationsoption
+        // "Kalender - Beschreibung: JSON".
+        // ACHTUNG: meta.start/meta.end NICHT verwenden - bei zusammengefassten
+        // Doppelstunden beschreiben sie nur die erste Einzelstunde.
+        const rawDesc = String(ev.description || '').trim();
+        let meta = null;
+        if (rawDesc.charAt(0) === '{') {
+          try { meta = JSON.parse(rawDesc); } catch (err) { meta = null; }
+        }
+        let rooms = []; let originalRooms = []; let klassen = []; let note = '';
+        if (meta) {
+          // code kommt als String; unbesetzt ist woertlich "None" (Python str(None)) -
+          // ein naiver Truthy-Test wuerde jede normale Stunde als Status werten.
+          const code = String(meta.code == null ? '' : meta.code).trim().toLowerCase();
+          const hasCode = code !== '' && code !== 'none' && code !== 'null';
+          cancelled = hasCode && code === 'cancelled';
+          changed = hasCode && code === 'irregular';
+          rooms = Array.isArray(meta.rooms) ? meta.rooms : [];
+          originalRooms = Array.isArray(meta.original_rooms) ? meta.original_rooms : [];
+          klassen = Array.isArray(meta.klassen) ? meta.klassen : [];
+          moved = !cancelled && !changed && originalRooms.length > 0;
+          // Ohne Fach ist es keine Vertretung, sondern eine Sonderveranstaltung -
+          // belastbarer als die Ersatzregel "Irregular ohne Raum".
+          special = changed && Array.isArray(meta.subjects) && meta.subjects.length === 0;
+          if (typeof meta.name === 'string' && meta.name.trim()) title = meta.name.trim();
+          const notes = [meta.info, meta.lstext, meta.substText]
+            .map((x) => String(x == null ? '' : x).trim())
+            .filter((x) => x && x.toLowerCase() !== 'none');
+          note = Array.from(new Set(notes)).join(' · ');
+        }
+
+        // Deduplizieren ueber den normierten Titel: WebUntis liefert dieselbe
+        // Sonderveranstaltung je Klassenverbund mehrfach. Bewusst NICHT ueber eine id -
+        // sonst staenden zwei identische Kacheln nebeneinander.
+        const key = start.toISOString() + '|' + end.toISOString() + '|' + title + '|' + location;
+        if (seen.has(key)) continue; seen.add(key);
+
+        bucket.items.push({
+          start, end, title, location, changed, cancelled, special, moved,
+          rooms, originalRooms, klassen, note,
+          description: meta ? '' : rawDesc,
+        });
       }
     }
     for (const b of buckets) b.items.sort((a, c) => a.start - c.start || a.end - c.end);
-    let minStart = null, maxEnd = null;
-    for (const b of buckets) for (const it of b.items) {
-      const s = fscMinOfDay(it.start), e = fscMinOfDay(it.end);
-      if (minStart === null || s < minStart) minStart = s;
-      if (maxEnd === null || e > maxEnd) maxEnd = e;
-    }
-    const hasAnyEvents = minStart !== null;
-    const [fsh, fsm] = this._config.fallback_day_start.split(':').map(Number);
-    const [feh, fem] = this._config.fallback_day_end.split(':').map(Number);
-    if (minStart === null) minStart = fsh * 60 + fsm;
-    if (maxEnd === null) maxEnd = feh * 60 + fem;
-    const pad = this._config.padding_minutes;
-    minStart = Math.max(0, Math.floor((minStart - pad) / 5) * 5);
-    maxEnd = Math.min(24 * 60, Math.ceil((maxEnd + pad) / 5) * 5);
-    this._buckets = buckets; this._hasAnyEvents = hasAnyEvents;
-    this._dayStartMin = minStart; this._dayEndMin = maxEnd;
+    this._buckets = buckets;
     // Punkt 7/3: nur bei ALLEN fehlgeschlagenen Quellen ein Vollfehler; bei Teilfehler
     // erfolgreiche Daten anzeigen und separat warnen (analog family-exam-card).
     const errCount = perEntity.filter((p) => p.error).length;
@@ -578,22 +790,63 @@ class FamilyTimetableCard extends HTMLElement {
     this._lastFetch = Date.now();
     this._render();
   }
+
+  /* ---------- Rendern ---------- */
+
+  _weekLabel(visible) {
+    if (!visible.length) return '';
+    const first = visible[0].date; const last = visible[visible.length - 1].date;
+    const d = (x) => String(x.getDate()).padStart(2, '0');
+    const m = (x) => String(x.getMonth() + 1).padStart(2, '0');
+    if (first.getMonth() === last.getMonth()) return `${d(first)}.–${d(last)}.${m(last)}.`;
+    return `${d(first)}.${m(first)}.–${d(last)}.${m(last)}.`;
+  }
+  _navHtml(visible) {
+    if (!this._isWeek() || !this._config.show_nav) return '';
+    const prevDis = this._weekOffset <= 0;
+    const nextDis = this._weekOffset >= this._maxOffset();
+    // "Heute" steht links vom Zurueck-Pfeil und wird bei Offset 0 nur unsichtbar
+    // geschaltet statt entfernt: so bleibt die Breite konstant und die Navigation
+    // springt beim Blaettern nicht.
+    const showToday = this._weekOffset > 0;
+    const todayBtn = `<button type="button" class="nav-today${showToday ? '' : ' is-hidden'}" data-nav="today"${showToday ? '' : ' tabindex="-1" aria-hidden="true"'}>Heute</button>`;
+    return `<div class="nav">
+      ${todayBtn}
+      <button type="button" class="nav-btn" data-nav="prev" ${prevDis ? 'disabled' : ''} title="Woche zurück" aria-label="Woche zurück"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+      <span class="nav-label">${fscEsc(this._weekLabel(visible))}</span>
+      <button type="button" class="nav-btn" data-nav="next" ${nextDis ? 'disabled' : ''} title="Woche vor" aria-label="Woche vor"><ha-icon icon="mdi:chevron-right"></ha-icon></button>
+    </div>`;
+  }
   _render() {
     if (!this._config) return;
     if (this._noSource) { this.innerHTML = fscSourcePlaceholder(); return; }
     const safeColor = fscSafeColor(this._config.color);
     this.style.setProperty('--fsc-accent', safeColor);
     this.style.setProperty('--fsc-border', fscHexToRgba(safeColor, 0.28));
+    this.style.setProperty('--fsc-soft', fscHexToRgba(safeColor, 0.16));
+    const minCol = fscClampInt(this._config.min_column_width, 80, 400, 132);
     const titleHtml = this._config.title ? `<div class="title">${fscEsc(this._config.title)}</div>` : '';
     const style = `<style>
       family-timetable-card ha-card{padding:16px 16px 12px;border:2px solid var(--fsc-border,var(--divider-color))}
-      family-timetable-card .title{font-size:1.5em;font-weight:500;margin-bottom:12px;color:var(--fsc-accent,var(--primary-text-color))}
-      family-timetable-card .grid{display:flex;gap:16px}
-      family-timetable-card .day-col{flex:1;min-width:0}
+      family-timetable-card .head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+      family-timetable-card .title{font-size:1.5em;font-weight:500;color:var(--fsc-accent,var(--primary-text-color))}
+      family-timetable-card .nav{display:flex;align-items:center;gap:4px;margin-left:auto}
+      family-timetable-card .nav-btn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:none;border-radius:16px;background:transparent;color:var(--primary-text-color);cursor:pointer}
+      family-timetable-card .nav-btn:hover:not([disabled]){background:rgba(128,128,128,0.16)}
+      family-timetable-card .nav-btn[disabled]{opacity:.3;cursor:default}
+      family-timetable-card .nav-btn ha-icon{--mdc-icon-size:20px}
+      family-timetable-card .nav-label{font-size:13px;font-weight:600;color:var(--secondary-text-color);min-width:104px;text-align:center;white-space:nowrap}
+      family-timetable-card .nav-today{font:inherit;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;padding:6px 10px;margin-right:4px;border:none;border-radius:8px;cursor:pointer;background:var(--fsc-soft,rgba(128,128,128,0.16));color:var(--fsc-accent,var(--primary-color))}
+      family-timetable-card .nav-today.is-hidden{visibility:hidden;pointer-events:none}
+      family-timetable-card .grid{display:flex;gap:16px;overflow-x:auto;scrollbar-width:thin;padding-bottom:2px}
+      family-timetable-card .day-col{flex:1 1 0;min-width:${minCol}px}
       family-timetable-card .weekday{font-size:14px;color:var(--primary-text-color)}
       family-timetable-card .date-row{font-size:13px;color:var(--secondary-text-color);margin-bottom:6px}
       family-timetable-card .day-num{font-size:20px;font-weight:600;color:var(--primary-text-color)}
       family-timetable-card .day-header{border-bottom:1px solid var(--divider-color);padding-bottom:6px;margin-bottom:8px}
+      family-timetable-card .day-col.today .day-header{border-bottom:2px solid var(--fsc-accent,var(--primary-color))}
+      family-timetable-card .day-col.today .day-num{color:var(--fsc-accent,var(--primary-color))}
+      family-timetable-card .day-col.past-day .day-header{opacity:.45}
       family-timetable-card .mensa-slot{min-height:18px;margin-top:4px}
       family-timetable-card .mensa-hint{display:block;font-size:11px;font-weight:700;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       family-timetable-card .mensa-hint.warn{color:#e05f4f}
@@ -603,34 +856,48 @@ class FamilyTimetableCard extends HTMLElement {
       family-timetable-card .mensa-hint.clickable{cursor:pointer}
       family-timetable-card .mensa-hint.clickable:focus-visible{outline:2px solid var(--fsc-accent,var(--primary-color));outline-offset:2px;border-radius:3px}
       family-timetable-card .day-body{position:relative}
-      family-timetable-card .event{position:absolute;background:rgba(var(--rgb-primary-color,79,168,224),0.16);border-left:3px solid var(--fsc-accent,var(--primary-color));border-radius:6px;padding:5px 8px;box-sizing:border-box;overflow:hidden;cursor:pointer;-webkit-tap-highlight-color:transparent}
+      family-timetable-card .event{position:absolute;background:var(--fsc-soft,rgba(79,168,224,0.16));border-left:3px solid var(--fsc-accent,var(--primary-color));border-radius:6px;padding:5px 8px;box-sizing:border-box;overflow:hidden;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:opacity .2s}
+      family-timetable-card .event:active{filter:brightness(0.92)}
       family-timetable-card .event.changed{border-left-color:#e0a84f;background:rgba(224,168,79,0.16)}
       family-timetable-card .event.cancelled{border-left-color:#e05f4f;background:rgba(224,95,79,0.14)}
       family-timetable-card .event.special{border-left-color:#e6c229;background:rgba(230,194,41,0.18)}
+      family-timetable-card .event.moved{border-left-color:#9b7fd4;background:rgba(155,127,212,0.16)}
+      family-timetable-card .event.past{opacity:.38}
+      family-timetable-card .event.past:hover{opacity:.72}
       family-timetable-card .strike{text-decoration:line-through;opacity:.75}
       family-timetable-card .event-title{font-size:13px;font-weight:500;color:var(--primary-text-color);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:4px}
       family-timetable-card .chg-icon{--mdc-icon-size:14px;color:#e0a84f;flex:none}
       family-timetable-card .cnl-icon{--mdc-icon-size:14px;color:#e05f4f;flex:none}
       family-timetable-card .spc-icon{--mdc-icon-size:14px;color:#e6c229;flex:none}
+      family-timetable-card .mov-icon{--mdc-icon-size:14px;color:#9b7fd4;flex:none}
       family-timetable-card .event-time{font-size:11px;color:var(--secondary-text-color);display:flex;align-items:center;gap:3px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       family-timetable-card .event-time ha-icon{--mdc-icon-size:13px}
-      family-timetable-card .now-line{position:absolute;left:-4px;right:0;height:0;border-top:2px solid var(--error-color,#db4437);opacity:.55}
-      family-timetable-card .empty{display:flex;align-items:center;gap:6px;background:rgba(var(--rgb-primary-color,79,168,224),0.16);border-left:3px solid var(--fsc-accent,var(--primary-color));border-radius:6px;padding:8px 10px;font-size:13px;color:var(--secondary-text-color)}
+      family-timetable-card .now-line{position:absolute;left:-4px;right:0;height:0;border-top:2px solid var(--error-color,#db4437);opacity:.55;z-index:2}
+      family-timetable-card .empty{display:flex;align-items:center;gap:6px;background:var(--fsc-soft,rgba(128,128,128,0.12));border-left:3px solid var(--fsc-accent,var(--primary-color));border-radius:6px;padding:8px 10px;font-size:13px;color:var(--secondary-text-color)}
       family-timetable-card .empty ha-icon{--mdc-icon-size:16px;color:var(--secondary-text-color)}
       family-timetable-card .err{margin-top:0;font-size:13px;color:var(--error-color,#db4437)}
       </style>`;
     // Punkt 7: bei einem fehlgeschlagenen Request keinen "keine Termine"-Zustand vortaeuschen.
     if (this._lastError) {
-      this.innerHTML = `<ha-card>${titleHtml}${style}<div class="err">Stundenplan konnte nicht geladen werden.</div></ha-card>`;
+      this.innerHTML = `<ha-card>${style}<div class="head">${titleHtml}</div><div class="err">Stundenplan konnte nicht geladen werden.</div></ha-card>`;
       return;
     }
-    const buckets = this._buckets || fscDates(this._config.days, this._config.skip_weekends).map((d) => ({ date: d, items: [] }));
-    const showGrid = this._hasAnyEvents !== false;
-    const dayStartMin = this._dayStartMin != null ? this._dayStartMin : 450;
-    const dayEndMin = this._dayEndMin != null ? this._dayEndMin : 840;
+    const all = this._buckets || this._allDates().map((d) => ({ date: d, items: [] }));
+    const { from, to } = this._visibleRange();
+    const visible = all.slice(from, to);
+    if (!visible.length) {
+      this.innerHTML = `<ha-card>${style}<div class="head">${titleHtml}</div><div class="err">Keine Tage zur Anzeige konfiguriert.</div></ha-card>`;
+      return;
+    }
+    const axis = this._axisFor(visible);
+    const dayStartMin = axis.minStart;
+    const dayEndMin = axis.maxEnd;
     const totalMin = Math.max(30, dayEndMin - dayStartMin);
-    const heightPx = Math.max(160, Math.round((totalMin / 60) * this._config.pixels_per_hour));
+    const showGrid = axis.hasAny;
+    const heightPx = Math.max(160, Math.round((totalMin / 60) * (Number(this._config.pixels_per_hour) || 70)));
     const now = new Date(); const nowMin = fscMinOfDay(now);
+    const dimPast = this._config.dim_past !== false;
+    const hlToday = this._config.highlight_today !== false;
     const weekdayFmt = new Intl.DateTimeFormat('de-DE', { weekday: 'short' });
     const dayFmt = new Intl.DateTimeFormat('de-DE', { day: 'numeric' });
     const monthFmt = new Intl.DateTimeFormat('de-DE', { month: 'short' });
@@ -638,14 +905,21 @@ class FamilyTimetableCard extends HTMLElement {
     // Feature Mensa: verschiebungsfrei - der Hinweis lebt in einem in JEDER Spalte
     // reservierten Header-Slot (leer, wenn kein Hinweis), damit das Raster ausgerichtet bleibt.
     const mensaActive = this._config.show_mensa && Array.isArray(this._config.mensa_entities);
-    const dayCols = buckets.map((b, di) => {
+    const dayCols = visible.map((b, li) => {
+      const globalIdx = from + li;
       const isToday = fscSameDay(b.date, now);
-      const hint = mensaActive ? this._mensaHint(di) : null;
+      const dayIsPast = b.date < new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const colCls = ['day-col'];
+      if (hlToday && isToday) colCls.push('today');
+      if (dimPast && dayIsPast) colCls.push('past-day');
+      // Mensa-Hinweis nur fuer heute und kommende Tage: an einem vergangenen Tag ist
+      // die Bestellung erledigt, eine Warnung waere dort nur Rauschen. Der Slot bleibt
+      // reserviert, damit die Spalten ausgerichtet bleiben.
+      const hint = (mensaActive && !dayIsPast) ? this._mensaHint(b, li) : null;
       let hintInner = '';
       if (hint) {
         if (hint.clickable && hint.ordered && hint.entityId) {
-          // Bestellt -> eigenes Menue-Detail-Popup (Klick-Handler liest das Entity und
-          // oeffnet _openMensaDetail). data-entity markiert den Hinweis als klickbar.
+          // Bestellt -> eigenes Menue-Detail-Popup. data-entity markiert den Hinweis als klickbar.
           hintInner = `<span class="mensa-hint ${hint.cls} clickable" role="button" tabindex="0" data-entity="${fscEsc(hint.entityId)}">${fscEsc(hint.text)}</span>`;
         } else if (hint.clickable && !hint.ordered && this._config.mensa_link) {
           // Nicht bestellt + Bestell-Link gesetzt -> externer Link zur Mensa (Bestellen).
@@ -672,18 +946,34 @@ class FamilyTimetableCard extends HTMLElement {
         const widthPct = 100 / cols;
         const posStyle = `top:${top}%;height:${height}%;left:calc(${leftPct}% + 1px);width:calc(${widthPct}% - 2px)`;
         const timeLabel = `${timeFmt.format(it.start)}–${timeFmt.format(it.end)}`;
-        const meta = it.location ? `${timeLabel} · Raum ${it.location}` : timeLabel;
-        const cls = it.cancelled ? 'event cancelled' : (it.special ? 'event special' : (it.changed ? 'event changed' : 'event'));
-        const icon = it.cancelled ? '<ha-icon icon="mdi:cancel" class="cnl-icon"></ha-icon>' : (it.special ? '<ha-icon icon="mdi:calendar-star" class="spc-icon"></ha-icon>' : (it.changed ? '<ha-icon icon="mdi:sync-alert" class="chg-icon"></ha-icon>' : ''));
+        let metaLabel = timeLabel;
+        if (it.location) metaLabel = `${timeLabel} · Raum ${it.location}`;
+        else if (it.moved) metaLabel = `${timeLabel} · Raum entfällt`;
+        const cls = ['event'];
+        if (it.cancelled) cls.push('cancelled');
+        else if (it.special) cls.push('special');
+        else if (it.changed) cls.push('changed');
+        else if (it.moved) cls.push('moved');
+        // Ausgrauen im Render ausgewertet, damit der Minutenticker es mitzieht.
+        if (dimPast && it.end < now) cls.push('past');
+        let icon = '';
+        if (it.cancelled) icon = '<ha-icon icon="mdi:cancel" class="cnl-icon"></ha-icon>';
+        else if (it.special) icon = '<ha-icon icon="mdi:calendar-star" class="spc-icon"></ha-icon>';
+        else if (it.changed) icon = '<ha-icon icon="mdi:sync-alert" class="chg-icon"></ha-icon>';
+        else if (it.moved) icon = '<ha-icon icon="mdi:map-marker-right" class="mov-icon"></ha-icon>';
         const evTitle = it.cancelled ? `<span class="strike">${fscEsc(it.title)}</span>` : fscEsc(it.title);
-        return `<div class="${cls}" style="${posStyle}" data-di="${di}" data-ii="${idx}"><div class="event-title">${icon}${evTitle}</div>${height > 7 && cols === 1 ? `<div class="event-time"><ha-icon icon="mdi:clock-outline"></ha-icon>${fscEsc(meta)}</div>` : ''}</div>`;
+        const metaHtml = (height > 7 && cols === 1)
+          ? `<div class="event-time"><ha-icon icon="mdi:clock-outline"></ha-icon>${fscEsc(metaLabel)}</div>` : '';
+        return `<div class="${cls.join(' ')}" style="${posStyle}" data-bi="${globalIdx}" data-ii="${idx}"><div class="event-title">${icon}${evTitle}</div>${metaHtml}</div>`;
       }).join('');
-      const nowLine = showGrid && isToday && nowMin >= dayStartMin && nowMin <= dayEndMin ? `<div class="now-line" style="top:${((nowMin - dayStartMin) / totalMin) * 100}%"></div>` : '';
+      const nowLine = showGrid && isToday && nowMin >= dayStartMin && nowMin <= dayEndMin
+        ? `<div class="now-line" style="top:${((nowMin - dayStartMin) / totalMin) * 100}%"></div>` : '';
       const empty = b.items.length === 0 ? '<div class="empty"><ha-icon icon="mdi:check"></ha-icon>Keine anstehenden Termine</div>' : '';
-      return `<div class="day-col"><div class="day-header"><div class="weekday">${fscEsc(weekdayFmt.format(b.date))}</div><div class="date-row"><span class="day-num">${dayFmt.format(b.date)}</span> <span class="month">${fscEsc(monthFmt.format(b.date).toUpperCase())}</span></div>${mensaSlot}</div><div class="day-body" style="${bodyStyle}">${nowLine}${blocks}${empty}</div></div>`;
+      return `<div class="${colCls.join(' ')}"><div class="day-header"><div class="weekday">${fscEsc(weekdayFmt.format(b.date))}</div><div class="date-row"><span class="day-num">${dayFmt.format(b.date)}</span> <span class="month">${fscEsc(monthFmt.format(b.date).toUpperCase())}</span></div>${mensaSlot}</div><div class="day-body" style="${bodyStyle}">${nowLine}${blocks}${empty}</div></div>`;
     }).join('');
     const partialErr = this._partialError ? '<div class="err">Einige Kalender konnten nicht geladen werden.</div>' : '';
-    this.innerHTML = `<ha-card>${titleHtml}${style}<div class="grid">${dayCols}</div>${partialErr}</ha-card>`;
+    const head = `<div class="head">${titleHtml}${this._navHtml(visible)}</div>`;
+    this.innerHTML = `<ha-card>${style}${head}<div class="grid">${dayCols}</div>${partialErr}</ha-card>`;
   }
 }
 customElements.define('family-timetable-card', FamilyTimetableCard);
@@ -766,53 +1056,154 @@ class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
   }
   _renderExtra() {
     const slot = this.querySelector('#extra-slot');
+    const inp = 'width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;';
+    const lbl = 'font-size:12px;color:var(--secondary-text-color);';
+    const chk = 'display:flex;align-items:center;gap:8px;font-size:13px;color:var(--primary-text-color);cursor:pointer;';
     slot.innerHTML = `
-      <div style="display:flex;flex-direction:column;gap:4px;">
-        <label for="days" style="font-size:12px;color:var(--secondary-text-color);">Anzahl Tage (heute + folgende)</label>
-        <input id="days" type="number" min="1" max="5" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+      <div style="display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--divider-color);padding-top:12px;">
+        <label for="range" style="${lbl}">Ansicht</label>
+        <select id="range" style="${inp}">
+          <option value="rolling">Rollende Tage (heute + folgende)</option>
+          <option value="week">Feste Woche</option>
+        </select>
       </div>
+
+      <div id="rolling-cfg" style="display:none;flex-direction:column;gap:12px;">
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <label for="days" style="${lbl}">Anzahl Tage (heute + folgende)</label>
+          <input id="days" type="number" min="1" max="7" style="${inp}">
+        </div>
+        <label style="${chk}"><input id="skip_weekends" type="checkbox"> Wochenende überspringen</label>
+      </div>
+
+      <div id="week-cfg" style="display:none;flex-direction:column;gap:12px;">
+        <div style="display:flex;flex-direction:column;gap:4px;">
+          <label for="week_days" style="${lbl}">Angezeigte Tage</label>
+          <select id="week_days" style="${inp}">
+            <option value="mo_fr">Montag bis Freitag</option>
+            <option value="mo_sa">Montag bis Samstag</option>
+            <option value="mo_so">Montag bis Sonntag</option>
+            <option value="custom">Individuell</option>
+          </select>
+        </div>
+        <div id="week-days-custom" style="display:none;flex-wrap:wrap;gap:10px;"></div>
+        <div style="font-size:11px;color:var(--secondary-text-color);">Liegt der heutige Tag nicht in der Auswahl (z.&nbsp;B. Samstag bei Mo–Fr), zeigt die Karte automatisch die kommende Woche.</div>
+        <label style="${chk}"><input id="show_nav" type="checkbox"> Blättern erlauben</label>
+        <div id="nav-cfg" style="display:none;flex-direction:column;gap:12px;">
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <label for="nav_weeks_ahead" style="${lbl}">Wochen voraus</label>
+            <input id="nav_weeks_ahead" type="number" min="0" max="8" style="${inp}">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <label for="nav_reset_minutes" style="${lbl}">Auto-Rücksprung auf die aktuelle Woche nach Minuten (0 = aus)</label>
+            <input id="nav_reset_minutes" type="number" min="0" max="240" style="${inp}">
+          </div>
+        </div>
+      </div>
+
       <div style="display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--divider-color);padding-top:12px;">
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--primary-text-color);cursor:pointer;">
-          <input id="show_mensa" type="checkbox"> Mensa-Hinweis anzeigen
-        </label>
+        <label style="${chk}"><input id="dim_past" type="checkbox"> Vergangene Stunden ausgrauen</label>
+        <label style="${chk}"><input id="highlight_today" type="checkbox"> Heutigen Tag hervorheben</label>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--divider-color);padding-top:12px;">
+        <label style="${chk}"><input id="show_mensa" type="checkbox"> Mensa-Hinweis anzeigen</label>
         <div id="mensa-cfg" style="display:none;flex-direction:column;gap:10px;">
-          <div style="font-size:11px;color:var(--secondary-text-color);">Mensa-Entities (binary_sensor, an = bestellt). Die Zuordnung zum jeweiligen Tag erfolgt automatisch über das Datum (Attribut <code>date</code>); die Reihenfolge spielt keine Rolle. Bis zu 10 Entities.</div>
+          <div style="font-size:11px;color:var(--secondary-text-color);">Mensa-Entities (binary_sensor, an = bestellt). Die Zuordnung zum jeweiligen Tag erfolgt automatisch über das Datum (Attribut <code>date</code>); die Reihenfolge spielt keine Rolle. Vergangene Tage zeigen keinen Hinweis. Bis zu 16 Entities.</div>
           <div id="mensa-rows" style="display:flex;flex-direction:column;gap:6px;"></div>
           <mwc-button id="mensa-add" dense>+ Mensa-Entity</mwc-button>
           <div style="display:flex;flex-direction:column;gap:4px;">
-            <label for="mensa_link" style="font-size:12px;color:var(--secondary-text-color);">Bestell-Link (optional)</label>
-            <input id="mensa_link" type="text" style="width:100%;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
+            <label for="mensa_link" style="${lbl}">Bestell-Link (optional)</label>
+            <input id="mensa_link" type="text" style="${inp}">
           </div>
           <div style="display:flex;flex-direction:column;gap:4px;">
-            <label for="afternoon_threshold" style="font-size:12px;color:var(--secondary-text-color);">Nachmittagsschwelle (ab dieser Uhrzeit gilt Essensbedarf)</label>
+            <label for="afternoon_threshold" style="${lbl}">Nachmittagsschwelle (ab dieser Uhrzeit gilt Essensbedarf)</label>
             <input id="afternoon_threshold" type="time" style="width:150px;box-sizing:border-box;padding:8px 10px;border-radius:4px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);font:inherit;">
           </div>
         </div>
       </div>`;
-    const daysEl = slot.querySelector('#days');
-    daysEl.addEventListener('input', () => {
-      const v = parseInt(daysEl.value, 10);
-      this._config.days = isNaN(v) ? 2 : v;
+
+    const bindNum = (id, key, dflt) => {
+      const el = slot.querySelector('#' + id);
+      el.addEventListener('input', () => {
+        const v = parseInt(el.value, 10);
+        this._config[key] = isNaN(v) ? dflt : v;
+        this._fireChanged();
+      });
+    };
+    const bindCheck = (id, key) => {
+      const el = slot.querySelector('#' + id);
+      el.addEventListener('change', () => {
+        this._config[key] = el.checked;
+        this._syncFields();
+        this._fireChanged();
+      });
+    };
+
+    slot.querySelector('#range').addEventListener('change', (ev) => {
+      this._config.range = ev.target.value;
+      this._syncFields();
       this._fireChanged();
     });
-    const showEl = slot.querySelector('#show_mensa');
-    showEl.addEventListener('change', () => {
-      this._config.show_mensa = showEl.checked;
-      slot.querySelector('#mensa-cfg').style.display = showEl.checked ? 'flex' : 'none';
+    bindNum('days', 'days', 2);
+    bindCheck('skip_weekends', 'skip_weekends');
+    slot.querySelector('#week_days').addEventListener('change', (ev) => {
+      // "Individuell" uebernimmt die aktuell wirksame Auswahl als Startwert,
+      // damit die Checkboxen nicht leer beginnen.
+      if (ev.target.value === 'custom') {
+        if (!Array.isArray(this._config.week_days)) this._config.week_days = fscWeekDayList(this._config.week_days);
+      } else {
+        this._config.week_days = ev.target.value;
+      }
+      this._syncFields();
       this._fireChanged();
     });
-    slot.querySelector('#mensa-add').addEventListener('click', () => {
-      const cur = this._config.mensa_entities || [];
-      if (cur.length >= 10) return; // bis zu 10 Mensa-Entities (Forecast-Tiefe)
-      this._config.mensa_entities = [...cur, ''];
-      this._renderMensaRows();
-      this._fireChanged();
-    });
+    bindCheck('show_nav', 'show_nav');
+    bindNum('nav_weeks_ahead', 'nav_weeks_ahead', 2);
+    bindNum('nav_reset_minutes', 'nav_reset_minutes', 10);
+    bindCheck('dim_past', 'dim_past');
+    bindCheck('highlight_today', 'highlight_today');
+    bindCheck('show_mensa', 'show_mensa');
     const linkEl = slot.querySelector('#mensa_link');
     linkEl.addEventListener('input', () => { this._config.mensa_link = linkEl.value; this._fireChanged(); });
     const thrEl = slot.querySelector('#afternoon_threshold');
     thrEl.addEventListener('input', () => { this._config.afternoon_threshold = thrEl.value || '13:00'; this._fireChanged(); });
+    slot.querySelector('#mensa-add').addEventListener('click', () => {
+      const cur = this._config.mensa_entities || [];
+      if (cur.length >= 16) return; // bis zu 16 Mensa-Entities (Forecast-Tiefe)
+      this._config.mensa_entities = [...cur, ''];
+      this._renderMensaRows();
+      this._fireChanged();
+    });
+
+    this._renderWeekDayBoxes();
     this._renderMensaRows();
+  }
+  _renderWeekDayBoxes() {
+    const box = this.querySelector('#week-days-custom');
+    if (!box) return;
+    const names = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+    box.innerHTML = '';
+    names.forEach((name, i) => {
+      const iso = i + 1;
+      const wrap = document.createElement('label');
+      wrap.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:13px;color:var(--primary-text-color);cursor:pointer;';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.dataset.iso = String(iso);
+      cb.addEventListener('change', () => {
+        const cur = fscWeekDayList(this._config.week_days);
+        const next = cb.checked
+          ? Array.from(new Set([...cur, iso])).sort((a, b) => a - b)
+          : cur.filter((n) => n !== iso);
+        // Mindestens ein Tag muss uebrig bleiben, sonst waere die Karte leer.
+        this._config.week_days = next.length ? next : cur;
+        this._syncFields();
+        this._fireChanged();
+      });
+      wrap.append(cb, document.createTextNode(name));
+      box.appendChild(wrap);
+    });
   }
   _renderMensaRows() {
     const container = this.querySelector('#mensa-rows');
@@ -848,18 +1239,48 @@ class FamilyTimetableCardEditor extends FamilySingleEntityEditorBase {
   }
   _syncFields() {
     super._syncFields();
-    const daysEl = this.querySelector('#days');
-    if (daysEl && document.activeElement !== daysEl) daysEl.value = this._config.days != null ? this._config.days : 2;
-    const showEl = this.querySelector('#show_mensa');
-    if (showEl) {
-      showEl.checked = !!this._config.show_mensa;
-      const cfg = this.querySelector('#mensa-cfg');
-      if (cfg) cfg.style.display = showEl.checked ? 'flex' : 'none';
-    }
-    const linkEl = this.querySelector('#mensa_link');
-    if (linkEl && document.activeElement !== linkEl) linkEl.value = this._config.mensa_link || '';
-    const thrEl = this.querySelector('#afternoon_threshold');
-    if (thrEl && document.activeElement !== thrEl) thrEl.value = this._config.afternoon_threshold || '13:00';
+    const c = this._config;
+    const set = (id, value) => {
+      const el = this.querySelector('#' + id);
+      if (el && document.activeElement !== el) el.value = value;
+    };
+    const check = (id, value) => {
+      const el = this.querySelector('#' + id);
+      if (el) el.checked = !!value;
+    };
+    const show = (id, visible) => {
+      const el = this.querySelector('#' + id);
+      if (el) el.style.display = visible ? 'flex' : 'none';
+    };
+
+    const isWeek = String(c.range || 'rolling').toLowerCase() === 'week';
+    set('range', isWeek ? 'week' : 'rolling');
+    show('rolling-cfg', !isWeek);
+    show('week-cfg', isWeek);
+
+    set('days', c.days != null ? c.days : 2);
+    check('skip_weekends', c.skip_weekends !== false);
+
+    const isCustom = Array.isArray(c.week_days);
+    set('week_days', isCustom ? 'custom' : (typeof c.week_days === 'string' && c.week_days ? c.week_days : 'mo_fr'));
+    show('week-days-custom', isCustom);
+    const active = fscWeekDayList(c.week_days);
+    this.querySelectorAll('#week-days-custom input[type=checkbox]').forEach((cb) => {
+      cb.checked = active.indexOf(Number(cb.dataset.iso)) !== -1;
+    });
+
+    check('show_nav', c.show_nav !== false);
+    show('nav-cfg', c.show_nav !== false);
+    set('nav_weeks_ahead', c.nav_weeks_ahead != null ? c.nav_weeks_ahead : 2);
+    set('nav_reset_minutes', c.nav_reset_minutes != null ? c.nav_reset_minutes : 10);
+
+    check('dim_past', c.dim_past !== false);
+    check('highlight_today', c.highlight_today !== false);
+
+    check('show_mensa', !!c.show_mensa);
+    show('mensa-cfg', !!c.show_mensa);
+    set('mensa_link', c.mensa_link || '');
+    set('afternoon_threshold', c.afternoon_threshold || '13:00');
   }
 }
 customElements.define('family-timetable-card-editor', FamilyTimetableCardEditor);

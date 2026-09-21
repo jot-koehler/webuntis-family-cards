@@ -3,6 +3,76 @@
 Alle nennenswerten Änderungen an **Family School Cards**.
 Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/); Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [1.4.0] – 2026-09-21
+
+Die `family-timetable-card` bekommt eine **feste Wochenansicht** mit Blättern,
+eine eigene Kategorie für Raumwechsel und eine optionale Anreicherung aus den
+WebUntis-Rohdaten. **Abwärtskompatibel** – bestehende Konfigurationen laufen
+unverändert weiter (`range` ist per Default `rolling`), Custom-Element-Namen
+und `hacs.json` unverändert, keine neuen Abhängigkeiten.
+
+### Neu
+
+- **Wochenansicht** (`range: week`): zeigt eine feste Kalenderwoche statt
+  „heute + N Tage". Welche Wochentage erscheinen, steuert `week_days` —
+  `mo_fr` (Default), `mo_sa`, `mo_so` oder eine Liste von ISO-Wochentagen wie
+  `[1, 3, 5]`. Liegt der heutige Tag nicht in der Auswahl (Samstag bei Mo–Fr),
+  springt die Ansicht auf die kommende Woche, statt eine vollständig vergangene
+  Woche zu zeigen.
+- **Vergangene Stunden ausgegraut** (`dim_past`, Default an). Sie bleiben voll
+  funktional — der Klick öffnet weiterhin das Detail-Popup, dort mit dem Badge
+  „Bereits vorbei". Der Zustand wird beim Rendern ausgewertet, nicht beim
+  Abruf, und wandert dadurch mit dem Minutentakt mit.
+- **Hervorhebung des heutigen Tages** (`highlight_today`, Default an): eine
+  dezente Linie in der Kartenfarbe unter dem Spaltenkopf plus Akzentfarbe auf
+  der Tagesziffer.
+- **Blättern** (`show_nav`, `nav_weeks_ahead`, `nav_reset_minutes`): im
+  Wochenmodus bis zu acht Wochen nach vorne. Ein „Heute"-Button springt zurück,
+  nach `nav_reset_minutes` ohne Bedienung automatisch. Alle blätterbaren Wochen
+  werden in einem Abruf geholt; das Umschalten läuft ohne Nachladen.
+- **Raumwechsel als eigene Kategorie** (violett): `Room change:` wird nicht mehr
+  als normale Stunde dargestellt und auch nicht mit einer Vertretung verwechselt.
+  Im Popup steht „alter Raum → neuer Raum" bzw. „→ entfällt".
+- **Optionale JSON-Anreicherung**: Steht in `description` ein JSON (WebUntis-
+  Option „Kalender - Beschreibung: JSON"), nutzt die Karte `code`, `subjects`,
+  `klassen` und `original_rooms` als verlässliche Quelle. `subjects: []` ersetzt
+  dabei die bisherige Ersatzregel „Irregular ohne Raum" für
+  Sonderveranstaltungen. Das Popup zeigt zusätzlich Klassenverbund und
+  Vertretungstext. Ohne JSON bleibt alles wie bisher.
+- **Horizontales Auffangnetz** (`min_column_width`, Default 132 px): Reichen
+  fünf bis sieben Spalten nicht in die Breite, wird die Karte horizontal
+  scrollbar statt unlesbar.
+- **Editor** um Ansichtsumschalter, Tagesauswahl (inklusive „Individuell" mit
+  Wochentag-Checkboxen), Navigationsoptionen und die beiden
+  Darstellungsschalter erweitert.
+
+### Geändert
+
+- Der Mensa-Hinweis wird an **vergangenen Tagen** nicht mehr angezeigt. Die
+  Bestellung ist dort erledigt, eine rote Warnung wäre nur Rauschen. Der Slot
+  bleibt reserviert, damit die Spalten ausgerichtet bleiben.
+- Der **Positions-Fallback** für Mensa-Sensoren ohne `date`-Attribut greift nur
+  noch im Rolling-Modus. Über mehrere Wochen hinweg ist eine Sensorposition
+  bedeutungslos und würde falsche Tage zuordnen.
+- `mensa_entities` erlaubt jetzt bis zu 16 Einträge (vorher 10).
+- Die **Zeitachse** wird nur noch über die sichtbaren Tage berechnet. Sonst
+  zöge ein einzelner Abendtermin in einer anderen Woche das Raster der
+  aktuellen Woche auseinander.
+- Die **Deduplizierung** vergleicht jetzt den um Präfixe bereinigten Titel.
+  WebUntis liefert dieselbe Sonderveranstaltung je Klassenverbund mehrfach;
+  bewusst wird nicht über eine ID dedupliziert, sonst stünden zwei identische
+  Kacheln nebeneinander.
+- `getCardSize()` liefert im Wochenmodus 6 statt 5.
+
+### Hinweise
+
+- Reine **Lehrerwechsel** bleiben unsichtbar: Der Elternzugang hat in der Regel
+  kein Leserecht für Lehrkräfte (`getTeachers()`), die Integration liefert dann
+  keine Lehrerfelder — auch nicht im JSON.
+- Die Option „Ereignisnamen ersetzen" (`calendar_replace_name`) darf **nicht**
+  benutzt werden, um die Präfixe `Cancelled:`, `Irregular:` und `Room change:`
+  zu übersetzen — die Karte erkennt die Status genau an diesen Zeichenketten.
+
 ## [1.3.2] – 2026-09-21
 
 Bugfix-Release. Keine Konfigurationsänderungen nötig.

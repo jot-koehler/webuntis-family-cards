@@ -22,7 +22,7 @@ HACS wie bei jeder anderen Custom Card.
 
 | Karte | Zweck | Für |
 |---|---|---|
-| `family-timetable-card` | Zeitraster-Stundenplan (heute + folgende Tage auf gemeinsamer Zeitachse), Klick-Detail-Popup, optionaler Mensa-Hinweis | ein Kind |
+| `family-timetable-card` | Zeitraster-Stundenplan — wahlweise rollend (heute + folgende Tage) oder als feste Kalenderwoche mit Blättern, Klick-Detail-Popup, optionaler Mensa-Hinweis | ein Kind |
 | `family-overview-card` | Kompakte "Wer muss wann los"-Balkenübersicht | mehrere Kinder |
 | `family-homework-card` | Hausaufgabenliste, farbcodiert je Kind, mit klickbaren Links | ein oder mehrere Kinder |
 | `family-exam-card` | Farbcodierte Klassenarbeiten-/Prüfungsliste, chronologisch gemischt | ein oder mehrere Kinder |
@@ -63,6 +63,26 @@ WebUntis-spezifische Extra und entfallen bei Fremdkalendern kommentarlos.
 
 ## Neue Funktionen
 
+- **Wochenansicht (Stundenplan):** `range: week` zeigt statt „heute + N Tage"
+  eine feste Kalenderwoche. Vergangene Stunden werden ausgegraut, bleiben aber
+  voll anklickbar; der heutige Tag bekommt eine dezente Linie in der
+  Kartenfarbe. Welche Wochentage erscheinen, ist frei wählbar (Mo–Fr, Mo–Sa,
+  Mo–So oder einzeln). Liegt der heutige Tag nicht in der Auswahl — etwa
+  Samstag bei Mo–Fr — zeigt die Karte automatisch die kommende Woche.
+- **Blättern (Stundenplan):** Im Wochenmodus lässt sich über Pfeile um bis zu
+  `nav_weeks_ahead` Wochen nach vorne blättern. Ein „Heute"-Button springt
+  zurück; nach `nav_reset_minutes` ohne Bedienung passiert das automatisch,
+  damit auf einem Wandtablet nicht dauerhaft eine fremde Woche stehenbleibt.
+  Alle blätterbaren Wochen werden in **einem** Abruf geholt, das Umschalten
+  läuft ohne Nachladen.
+- **Raumwechsel als eigene Kategorie (Stundenplan):** Ein `Room change:`-Eintrag
+  wird nicht mehr wie eine Vertretung behandelt, sondern violett markiert — die
+  Stunde findet statt, nur woanders.
+- **Optionale Anreicherung aus dem WebUntis-JSON:** Steht in der Beschreibung
+  ein JSON (Integrationsoption „Kalender - Beschreibung: JSON"), nutzt die Karte
+  `code`, `subjects`, `klassen` und `original_rooms` als verlässliche Quelle
+  statt der Präfix-Heuristik und zeigt im Detail-Popup zusätzlich den
+  Klassenverbund, den Raumwechsel (alt → neu) und den Vertretungstext.
 - **Klick-Detail-Popup (Stundenplan):** Klick auf einen Eintrag öffnet ein
   natives `ha-dialog` mit Titel, Status (Änderung/Entfallen/Sonderveranstaltung),
   Datum, Zeit, Raum und Beschreibung.
@@ -153,6 +173,16 @@ Pro Kind, im Options-Flow der jeweiligen Integration (⋮-Menü am Config-Entry
    Integration jede Stunde ohne Fach kommentarlos heraus — das ist der
    Standardgrund, warum solche Termine "einfach fehlen".
 
+3. **Schritt "Calendar"** → `calendar_show_room_change` aktivieren. Erst damit
+   liefert die Integration das Präfix `Room change:`, aus dem die Karte den
+   Raumwechsel erkennt.
+4. **Schritt "Calendar"** → `calendar_description` auf **JSON** stellen
+   (empfohlen). Damit stehen der Karte `code`, `subjects`, `klassen` und
+   `original_rooms` zur Verfügung; sie muss den Status dann nicht mehr aus den
+   Präfixen erraten und zeigt im Detail-Popup zusätzlich Klassenverbund,
+   Raumwechsel und Vertretungstext. Ohne diese Option funktioniert alles
+   weiterhin, nur eben über die Heuristik.
+
 Nach dem Ändern: Integration neu laden (⋮ → Neu laden) reicht meist; falls
 der Effekt ausbleibt, Home Assistant einmal neu starten.
 
@@ -161,22 +191,52 @@ angezeigt, nicht nur die gewünschten Sonderveranstaltungen. In der Praxis war
 das bisher unproblematisch, aber bei ungewöhnlichen Stundenplänen lohnt sich
 ein kurzer Blick, ob unerwünschte Einträge auftauchen.
 
-### Wie die Karte cancelled/changed/special erkennt
+### Wie die Karte cancelled/changed/moved/special erkennt
 
-Die Integration liefert Kalender-Events mit einem Präfix im `summary`-Feld:
+Die Karte hat zwei Wege. Der erste funktioniert mit **jedem** Kalender, der
+zweite ist eine optionale Anreicherung für WebUntis.
+
+**Weg 1 — Präfixe im `summary` (immer aktiv):**
 
 - `Cancelled: <Fach>` → **entfallen** — rot, durchgestrichen.
 - `Irregular: <Fach>` **mit** Raum-Angabe (`location`) → **Vertretung/Änderung**
-  (Fachwechsel, Raumwechsel, Lehrerwechsel) — orange.
+  — orange.
 - `Irregular: <Fach>` **ohne** Raum-Angabe → **Sonderveranstaltung** — gelb.
+- `Room change: <Fach>` → **Raumwechsel** — violett. Die Stunde findet statt,
+  nur in einem anderen Raum (oder ganz ohne, wenn der Raum ersatzlos entfällt).
 
-Der letzte Punkt ist eine **Heuristik**, keine echte Kategorie aus den
-Rohdaten: WebUntis markiert Sonderveranstaltungen genauso als "Irregular"
+Die Integration setzt diese Präfixe in sequentiellen `if`-Blöcken, nicht als
+`elif`: `Cancelled` und `Irregular` **überschreiben** ein `Room change`. Ein
+Eintrag trägt deshalb nie zwei Marker gleichzeitig.
+
+Die Unterscheidung Sonderveranstaltung/Vertretung ist auf diesem Weg eine
+**Heuristik**: WebUntis markiert Sonderveranstaltungen genauso als „Irregular"
 wie eine normale Vertretung, liefert für sie aber praktisch nie einen Raum
-(weil kein Fach zugeordnet ist). Eine echte Vertretung hatte in unseren
-Tests immer einen Raum. **Bekannte Grenze:** Sollte eine Schule eine
-raumlose Vertretung eintragen, würde sie fälschlich gelb statt orange
-erscheinen. Bisher nicht beobachtet, aber gut zu wissen.
+(weil kein Fach zugeordnet ist). **Bekannte Grenze:** Sollte eine Schule eine
+raumlose Vertretung eintragen, erschiene sie fälschlich gelb statt orange.
+
+**Weg 2 — JSON in der Beschreibung (empfohlen, siehe Option 4 oben):**
+
+Liegt in `description` ein JSON, liest die Karte die echten Felder und die
+Heuristik entfällt:
+
+- `code` (`cancelled` / `irregular` / sonst nichts) bestimmt den Status.
+  **Achtung beim Nachbauen:** Unbesetzt kommt `code` als String `"None"`
+  (Python-`str(None)`) — ein naiver Truthy-Test wertet jede normale Stunde
+  als Statusstunde.
+- `subjects: []` kennzeichnet die Sonderveranstaltung — eine Stunde ohne Fach
+  ist keine Vertretung.
+- `original_rooms` nicht leer und kein Status-Code → Raumwechsel; das Popup
+  zeigt dann „alter Raum → neuer Raum" bzw. „→ entfällt".
+- `klassen` erscheint im Popup, `info`/`lstext`/`substText` als Hinweistext.
+
+Rohes JSON wird nie angezeigt — wenn es sich parsen lässt, ersetzt die Karte
+es durch die aufbereiteten Felder.
+
+> **Nicht** die Option „Ereignisnamen ersetzen" (`calendar_replace_name`)
+> benutzen, um die englischen Präfixe zu übersetzen. Die Karte erkennt Ausfall,
+> Vertretung und Raumwechsel genau an diesen Zeichenketten — wer sie ersetzt,
+> schaltet die Farbcodierung ab.
 
 ---
 
@@ -207,6 +267,19 @@ entities:
   - calendar.webuntis_kind_a
 color: "#ff9800"
 days: 2
+
+---
+# Dieselbe Karte als feste Wochenansicht mit Blättern
+type: custom:family-timetable-card
+title: Kind A
+entities:
+  - calendar.webuntis_kind_a
+color: "#ff9800"
+range: week
+week_days: mo_fr      # oder mo_sa, mo_so, oder z. B. [1, 3, 5]
+nav_weeks_ahead: 2
+grid_options:
+  columns: full       # fünf Spalten brauchen die volle Breite
 
 ---
 type: custom:family-overview-card
@@ -256,14 +329,22 @@ people:
 | `people` | overview, homework, exam | Liste `{name, entity, color}` — ein Eintrag pro Kind (farbcodiert) | erforderlich |
 | `entities` | timetable, homework (Legacy) | Liste von Kalender-Entities (bei homework: klassischer Einzel-Kind-Modus ohne Farbcodierung) | erforderlich |
 | `color` | timetable, homework/overview/exam (pro Kind) | Akzentfarbe (Hex) | `#4fa8e0` |
-| `days` | timetable | Anzahl dargestellter Tage ab heute (Wochenenden werden übersprungen) | `2` |
+| `range` | timetable | `rolling` = heute + folgende Tage, `week` = feste Kalenderwoche | `rolling` |
+| `week_days` | timetable | Nur im Wochenmodus: `mo_fr`, `mo_sa`, `mo_so` oder Liste von ISO-Wochentagen (`[1, 3, 5]` = Mo/Mi/Fr). Liegt heute nicht in der Auswahl, zeigt die Karte die kommende Woche. | `mo_fr` |
+| `dim_past` | timetable | Vergangene Stunden ausgrauen (bleiben anklickbar) | `true` |
+| `highlight_today` | timetable | Heutigen Tag mit einer Linie in der Kartenfarbe hervorheben | `true` |
+| `show_nav` | timetable | Blätter-Navigation anzeigen (nur im Wochenmodus wirksam) | `true` |
+| `nav_weeks_ahead` | timetable | Wie viele Wochen nach vorne geblättert werden kann (0–8) | `2` |
+| `nav_reset_minutes` | timetable | Automatischer Rücksprung auf die aktuelle Woche nach Minuten ohne Bedienung, `0` = aus | `10` |
+| `min_column_width` | timetable | Mindestbreite einer Tagesspalte in Pixel; darunter wird die Karte horizontal scrollbar | `132` |
+| `days` | timetable | Nur im Rolling-Modus: Anzahl dargestellter Tage ab heute | `2` |
 | `days` | homework | Vorschau-Zeitraum in Tagen | `14` |
 | `days` | overview | Anzahl dargestellter Tage ab heute | `2` |
 | `days` | exam | Vorschau-Zeitraum in Tagen | `60` |
 | `max_items` | exam | Maximale Anzahl Einträge in der zusammengeführten Liste | `5` |
-| `skip_weekends` | timetable, overview | Samstag/Sonntag überspringen | `true` |
+| `skip_weekends` | timetable (nur Rolling-Modus), overview | Samstag/Sonntag überspringen | `true` |
 | `show_mensa` | timetable | Mensa-Hinweis einblenden | `false` |
-| `mensa_entities` | timetable | Liste `binary_sensor.*` (an = bestellt). Zuordnung zum jeweiligen Tag über das Attribut `date` (`YYYY-MM-DD`) — Reihenfolge und Anzahl egal, bis zu 10 Entities. Sensoren ohne `date` werden per Position zugeordnet (Legacy). | — |
+| `mensa_entities` | timetable | Liste `binary_sensor.*` (an = bestellt). Zuordnung zum jeweiligen Tag über das Attribut `date` (`YYYY-MM-DD`) — Reihenfolge und Anzahl egal, bis zu 16 Entities. Vergangene Tage zeigen keinen Hinweis. Sensoren ohne `date` werden per Position zugeordnet (Legacy, **nur im Rolling-Modus** — über mehrere Wochen hinweg wäre eine Position bedeutungslos). | — |
 | `mensa_link` | timetable | Optionaler Bestell-Link. Klick auf einen **nicht** bestellten Tag (rot) öffnet ihn. | — |
 | `afternoon_threshold` | timetable | Ab dieser Uhrzeit gilt der Tag als Nachmittagsschul-Tag (= Essensbedarf) | `13:00` |
 | `refresh_interval` | alle | Sekunden zwischen Neuabruf der Kalenderdaten | `300` |
@@ -300,8 +381,20 @@ Klick auf einen **bestellten** Tag öffnet ein natives `ha-dialog` mit Datum, Me
 
 ## Bekannte Einschränkungen
 
-- Die special/changed-Unterscheidung ist eine Heuristik (siehe oben) und
-  kann bei ungewöhnlichen Datenlagen daneben liegen.
+- Die special/changed-Unterscheidung ist ohne die JSON-Option eine Heuristik
+  (siehe oben) und kann bei ungewöhnlichen Datenlagen daneben liegen.
+- **Reine Lehrerwechsel sind nicht erkennbar.** Der WebUntis-Elternzugang hat
+  in der Regel kein Leserecht für Lehrkräfte (`getTeachers()`); die Integration
+  liefert dann keine Lehrerfelder — auch nicht im JSON. Eine Stunde, bei der
+  nur die Lehrkraft wechselt, erscheint deshalb als ganz normale Stunde, obwohl
+  die WebUntis-Oberfläche sie als Änderung markiert.
+- **Wie weit die Wochenansicht reicht,** bestimmt die Integration: Ihr
+  Datenfenster geht von Montag der laufenden Woche bis heute + 30 Tage. Weiter
+  zurück gibt es keine Daten; weiter nach vorne liefert der Kalender nichts
+  mehr, egal was `nav_weeks_ahead` sagt.
+- Bei zusammengefassten Doppelstunden beschreibt das JSON in `description` nur
+  die erste Einzelstunde. Die Karte liest Start und Ende deshalb ausschließlich
+  aus dem Kalender-Event.
 - Kein Drag&Drop zum Umsortieren der Kinder in den Editoren (Overview/Homework/Exam) —
   Zeilen werden in der Reihenfolge angelegt, in der sie hinzugefügt wurden.
 - Keine mobile-App-Vorschau im Editor — Layout ist auf Handy-Nutzung hin
