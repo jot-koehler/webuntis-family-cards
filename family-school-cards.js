@@ -1008,8 +1008,13 @@ class FamilyOverviewCard extends HTMLElement {
     const dayBlocks = dates.map((date, di) => {
       const isToday = fscSameDay(date, now);
       const dateLabel = `${weekdayFmt.format(date)} · ${dayFmt.format(date)}. ${monthFmt.format(date)}`;
+      // Die "Jetzt"-Markierung liegt in .rows und damit ueber Namensspalte UND Zeitleiste.
+      // Ein reiner Prozentwert wuerde sich deshalb auf die gesamte Zeilenbreite beziehen und
+      // die Linie (vor allem vormittags) zu weit links zeichnen. Daher: Namensspalte + Gap
+      // als festen Offset abziehen und den Anteil nur auf den verbleibenden Track anwenden.
+      const nowFrac = (nowMin - dayStartMin) / totalMin;
       const nowMark = showGrid && isToday && nowMin >= dayStartMin && nowMin <= dayEndMin
-        ? `<div class="now-mark" style="left:${((nowMin - dayStartMin) / totalMin) * 100}%"></div>` : '';
+        ? `<div class="now-mark" style="left:calc(var(--fsc-name-w) + (100% - var(--fsc-name-w)) * ${nowFrac})"></div>` : '';
       const rows = perPersonDays.map((p) => {
         const col = fscSafeColor(p.color);
         // Punkt 7: fehlerhafter Kalender einer Person darf nicht als "schulfrei" erscheinen.
@@ -1038,9 +1043,9 @@ class FamilyOverviewCard extends HTMLElement {
       family-overview-card .day-block:last-child{margin-bottom:0}
       family-overview-card .day-label{font-size:11px;font-weight:600;color:var(--secondary-text-color);text-transform:uppercase;letter-spacing:.02em;margin-bottom:5px}
       family-overview-card .day-label.today{color:var(--primary-text-color)}
-      family-overview-card .rows{position:relative;display:flex;flex-direction:column;gap:4px}
-      family-overview-card .row{display:flex;align-items:center;gap:6px}
-      family-overview-card .row-name{width:44px;flex:none;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      family-overview-card .rows{position:relative;display:flex;flex-direction:column;gap:4px;--fsc-label:44px;--fsc-gap:6px;--fsc-name-w:calc(var(--fsc-label) + var(--fsc-gap))}
+      family-overview-card .row{display:flex;align-items:center;gap:var(--fsc-gap)}
+      family-overview-card .row-name{width:var(--fsc-label);flex:none;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       family-overview-card .row-track{position:relative;flex:1;height:22px;border-radius:5px;background:rgba(128,128,128,0.12)}
       family-overview-card .bar{position:absolute;top:0;bottom:0;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500;color:var(--primary-text-color);padding:0 4px;box-sizing:border-box;overflow:hidden;white-space:nowrap}
       family-overview-card .row-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--secondary-text-color)}

@@ -3,6 +3,21 @@
 Alle nennenswerten Änderungen an **Family School Cards**.
 Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/); Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [1.3.1] – 2026-09-21
+
+Bugfix-Release. Keine Konfigurationsänderungen nötig.
+
+### Behoben
+- **`family-overview-card`: „Jetzt"-Markierung stand zu weit links.** Die Linie liegt
+  im Container `.rows`, der die Namensspalte (44 px) samt Abstand (6 px) mit umfasst.
+  Der bisherige reine Prozentwert bezog sich damit auf die gesamte Zeilenbreite statt
+  auf die Zeitleiste (`.row-track`) – der Fehler war vormittags am größten und zeigte
+  die Linie teils noch vor dem Beginn des ersten Balkens. Die Position wird jetzt als
+  `calc()` aus festem Namensspalten-Offset plus Anteil an der verbleibenden Breite
+  berechnet. Breite der Namensspalte und Abstand liegen dafür als CSS-Variablen
+  (`--fsc-label`, `--fsc-gap`, `--fsc-name-w`) an einer Stelle, damit Linie und Zeilen
+  nicht wieder auseinanderlaufen.
+
 ## [1.3.0] – 2026-09-19
 
 Mensa-Hinweis von „ein Sensor pro Position" auf eine **datumsbasierte** Zuordnung
