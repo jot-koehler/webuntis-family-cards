@@ -3,6 +3,17 @@
 Alle nennenswerten Änderungen an **Family School Cards**.
 Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/); Versionierung nach [SemVer](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Behoben
+
+- **Reine Lehrerwechsel als Vertretung (Stundenplan):** Wechselt nur die
+  Lehrkraft, liefert WebUntis `code: "None"` und trägt die eigentliche Lehrkraft
+  in `original_teachers` ein. Die Karte wertete das Feld nicht aus und zeigte
+  die Stunde als normalen Unterricht. Mit der JSON-Option gilt sie jetzt als
+  Vertretung (orange), das Popup zeigt „alte Lehrkraft → neue Lehrkraft".
+  Zugänge ohne Lehrerfelder verhalten sich wie bisher.
+
 ## [1.5.0] – 2026-09-21
 
 ### Neu

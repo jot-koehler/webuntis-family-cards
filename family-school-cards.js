@@ -188,7 +188,7 @@ function fscClampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.floor(n)));
 }
 
-/* Raumliste aus dem WebUntis-JSON lesbar machen (long_name bevorzugt). */
+/* Raum- oder Lehrerliste aus dem WebUntis-JSON lesbar machen (long_name bevorzugt). */
 function fscRoomLabel(list) {
   if (!Array.isArray(list) || !list.length) return '';
   return list
@@ -213,6 +213,7 @@ function fscKlassenLabel(list) {
  *   - normal      regulaerer Unterricht
  *   - cancelled   "Cancelled: ..." -> rot, durchgestrichen
  *   - changed     "Irregular: ..." MIT Raum-Angabe -> Vertretung/Aenderung, orange
+ *                 (mit JSON auch ein reiner Lehrerwechsel ueber original_teachers)
  *   - special     "Irregular: ..." OHNE Raum-Angabe -> Sonderveranstaltung, gelb
  *                 (Einschulung, Klassenlehrerunterricht, Wandertag, ...)
  * Die special/changed-Unterscheidung ist eine Heuristik (siehe README):
@@ -559,6 +560,11 @@ class FamilyTimetableCard extends HTMLElement {
     const roomHtml = oldRoom
       ? `<div class="fsc-dlg-row"><ha-icon icon="mdi:map-marker-right"></ha-icon>${fscEsc(oldRoom)} → ${fscEsc(newRoom || 'entfällt')}</div>`
       : (item.location ? `<div class="fsc-dlg-row"><ha-icon icon="mdi:map-marker-outline"></ha-icon>${fscEsc(item.location)}</div>` : '');
+    // Lehrerzeile nur bei einem Wechsel (alt -> neu); sonst bleibt das Popup wie bisher.
+    const oldTeacher = fscRoomLabel(item.originalTeachers);
+    const teacherHtml = oldTeacher
+      ? `<div class="fsc-dlg-row"><ha-icon icon="mdi:account-switch-outline"></ha-icon>${fscEsc(oldTeacher)} → ${fscEsc(fscRoomLabel(item.teachers) || 'offen')}</div>`
+      : '';
     const klassenLabel = fscKlassenLabel(item.klassen);
     const klassenHtml = klassenLabel
       ? `<div class="fsc-dlg-row"><ha-icon icon="mdi:account-group-outline"></ha-icon>${fscEsc(klassenLabel)}</div>`
@@ -578,6 +584,7 @@ class FamilyTimetableCard extends HTMLElement {
         <div class="fsc-dlg-row"><ha-icon icon="mdi:calendar-outline"></ha-icon>${fscEsc(dateFmt.format(item.start))}</div>
         <div class="fsc-dlg-row"><ha-icon icon="mdi:clock-outline"></ha-icon>${timeFmt.format(item.start)}–${timeFmt.format(item.end)}</div>
         ${roomHtml}
+        ${teacherHtml}
         ${klassenHtml}
         ${descHtml}
         <div class="fsc-dlg-actions"><button type="button" class="fsc-dlg-close">Schließen</button></div>
@@ -748,7 +755,8 @@ class FamilyTimetableCard extends HTMLElement {
         if (rawDesc.charAt(0) === '{') {
           try { meta = JSON.parse(rawDesc); } catch (err) { meta = null; }
         }
-        let rooms = []; let originalRooms = []; let klassen = []; let note = '';
+        let rooms = []; let originalRooms = []; let teachers = []; let originalTeachers = [];
+        let klassen = []; let note = '';
         if (meta) {
           // code kommt als String; unbesetzt ist woertlich "None" (Python str(None)) -
           // ein naiver Truthy-Test wuerde jede normale Stunde als Status werten.
@@ -758,11 +766,17 @@ class FamilyTimetableCard extends HTMLElement {
           changed = hasCode && code === 'irregular';
           rooms = Array.isArray(meta.rooms) ? meta.rooms : [];
           originalRooms = Array.isArray(meta.original_rooms) ? meta.original_rooms : [];
+          teachers = Array.isArray(meta.teachers) ? meta.teachers : [];
+          originalTeachers = Array.isArray(meta.original_teachers) ? meta.original_teachers : [];
           klassen = Array.isArray(meta.klassen) ? meta.klassen : [];
-          moved = !cancelled && !changed && originalRooms.length > 0;
           // Ohne Fach ist es keine Vertretung, sondern eine Sonderveranstaltung -
           // belastbarer als die Ersatzregel "Irregular ohne Raum".
           special = changed && Array.isArray(meta.subjects) && meta.subjects.length === 0;
+          // Reiner Lehrerwechsel: WebUntis setzt dafuer keinen code ("None"), traegt
+          // die eigentliche Lehrkraft aber in original_teachers ein. Das ist eine
+          // Vertretung und schlaegt einen gleichzeitigen Raumwechsel - wie "Irregular:".
+          if (!cancelled && !changed && originalTeachers.length > 0) changed = true;
+          moved = !cancelled && !changed && originalRooms.length > 0;
           if (typeof meta.name === 'string' && meta.name.trim()) title = meta.name.trim();
           const notes = [meta.info, meta.lstext, meta.substText]
             .map((x) => String(x == null ? '' : x).trim())
@@ -778,7 +792,7 @@ class FamilyTimetableCard extends HTMLElement {
 
         bucket.items.push({
           start, end, title, location, changed, cancelled, special, moved,
-          rooms, originalRooms, klassen, note,
+          rooms, originalRooms, teachers, originalTeachers, klassen, note,
           description: meta ? '' : rawDesc,
         });
       }

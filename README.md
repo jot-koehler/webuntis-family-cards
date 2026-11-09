@@ -234,6 +234,10 @@ Heuristik entfällt:
   ist keine Vertretung.
 - `original_rooms` nicht leer und kein Status-Code → Raumwechsel; das Popup
   zeigt dann „alter Raum → neuer Raum" bzw. „→ entfällt".
+- `original_teachers` nicht leer und kein Status-Code → Vertretung (orange).
+  WebUntis setzt für einen reinen Lehrerwechsel keinen `code`; das Popup zeigt
+  „alte Lehrkraft → neue Lehrkraft". Ändert sich zugleich der Raum, gilt die
+  Stunde als Vertretung, der Raumwechsel steht trotzdem im Popup.
 - `klassen` erscheint im Popup, `info`/`lstext`/`substText` als Hinweistext.
 
 Rohes JSON wird nie angezeigt — wenn es sich parsen lässt, ersetzt die Karte
@@ -390,11 +394,12 @@ Klick auf einen **bestellten** Tag öffnet ein natives `ha-dialog` mit Datum, Me
 
 - Die special/changed-Unterscheidung ist ohne die JSON-Option eine Heuristik
   (siehe oben) und kann bei ungewöhnlichen Datenlagen daneben liegen.
-- **Reine Lehrerwechsel sind nicht erkennbar.** Der WebUntis-Elternzugang hat
-  in der Regel kein Leserecht für Lehrkräfte (`getTeachers()`); die Integration
-  liefert dann keine Lehrerfelder — auch nicht im JSON. Eine Stunde, bei der
-  nur die Lehrkraft wechselt, erscheint deshalb als ganz normale Stunde, obwohl
-  die WebUntis-Oberfläche sie als Änderung markiert.
+- **Reine Lehrerwechsel erkennt die Karte nur mit Lehrerfeldern.** Mit der
+  JSON-Option wertet sie `original_teachers` aus. Viele WebUntis-Elternzugänge
+  haben aber kein Leserecht für Lehrkräfte (`getTeachers()`); die Integration
+  liefert dann keine Lehrerfelder — auch nicht im JSON. Bei solchen Zugängen
+  erscheint eine Stunde, bei der nur die Lehrkraft wechselt, weiterhin als ganz
+  normale Stunde, obwohl die WebUntis-Oberfläche sie als Änderung markiert.
 - **Wie weit die Wochenansicht reicht,** bestimmt die Integration: Ihr
   Datenfenster geht von Montag der laufenden Woche bis heute + 30 Tage. Weiter
   zurück gibt es keine Daten; weiter nach vorne liefert der Kalender nichts
@@ -574,7 +579,9 @@ The card has two paths. The first works with **any** calendar: it reads the
 is an optional enrichment for WebUntis: if `description` contains JSON, the
 card uses `code`, `subjects`, `klassen` and `original_rooms` as an authoritative
 source. Note that WebUntis delivers the string `"None"` — not a JSON `null` —
-for a lesson with no status code.
+for a lesson with no status code. A non-empty `original_teachers` with no status
+code marks a pure teacher change, which the card shows as a substitution
+(orange); the popup shows "old teacher → new teacher".
 
 Do not use `calendar_replace_name` to strip those prefixes; the card needs them
 whenever the JSON option is off.
@@ -583,11 +590,12 @@ whenever the JSON option is off.
 
 - Without the JSON option, the special/changed distinction is a heuristic and
   can be wrong with unusual data.
-- **Pure teacher changes cannot be detected.** A WebUntis parent account
-  normally has no read permission for teachers (`getTeachers()`), so the
-  integration supplies no teacher fields — not even in the JSON. A lesson where
-  only the teacher changes therefore looks like an ordinary lesson, even though
-  the WebUntis interface marks it as changed.
+- **Pure teacher changes need teacher fields.** With the JSON option the card
+  reads `original_teachers`. Many WebUntis parent accounts, however, have no
+  read permission for teachers (`getTeachers()`), so the integration supplies
+  no teacher fields — not even in the JSON. With such an account a lesson where
+  only the teacher changes still looks like an ordinary lesson, even though the
+  WebUntis interface marks it as changed.
 - **How far the week view reaches** is decided by the integration: its data
   window runs from Monday of the current week to today + 30 days. There is
   nothing further back, and nothing beyond that point no matter what
