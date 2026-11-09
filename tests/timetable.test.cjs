@@ -87,8 +87,13 @@ const EV = [
 ];
 
 (async () => {
-  const c = mk({ entities: ['calendar.lino'], range: 'week', week_days: 'mo_fr', nav_weeks_ahead: 0 });
-  c._hass = { callApi: async () => EV, states: {} };
+  // Die echten Daten tragen ein festes Datum (23.09.2026), das Fenster der
+  // Wochenansicht beginnt aber in der laufenden Woche. Danach war die Woche leer
+  // und der Block brach ab. Daher auf heute verschoben, nur der Tag sichtbar.
+  const evToday = EV.map((e) => JSON.parse(JSON.stringify(e).split('2026-09-23').join(iso(new Date()))));
+  const dowToday = new Date().getDay() === 0 ? 7 : new Date().getDay();
+  const c = mk({ entities: ['calendar.lino'], range: 'week', week_days: [dowToday], nav_weeks_ahead: 0 });
+  c._hass = { callApi: async () => evToday, states: {} };
   await c._fetchAndRender();
   const items = c._buckets.flatMap(b => b.items);
   const kat = (it) => it.cancelled ? 'ausfall' : it.special ? 'sonder' : it.changed ? 'vertretung' : it.moved ? 'raumwechsel' : 'normal';
@@ -167,6 +172,46 @@ const EV = [
   accOff.setConfig({ entities: ['calendar.x'], accent_border: true });
   eq('zurueck auf true entfernt plain-border', accOff.hasAttribute('plain-border'), false);
   eq('Titel behaelt die Akzentfarbe', /\.title\{[^}]*--fsc-accent/.test(accOff.innerHTML), true);
+
+  console.log('\n--- 6. Reiner Lehrerwechsel über original_teachers ---');
+  // Form wie die echten Daten (Ethik, Lehrkraft Sra vertreten, code "None").
+  // Auf den heutigen Tag gelegt, damit der Block an jedem Tag im Fenster liegt.
+  const lesson = (hh, extra) => ({
+    start: { dateTime: todayIso + 'T' + hh + ':00:00' }, end: { dateTime: todayIso + 'T' + hh + ':45:00' },
+    summary: extra.name, location: 'R206',
+    description: JSON.stringify(Object.assign({ code: 'None', subjects: [{ name: 'ETH', long_name: 'Ethik' }],
+      rooms: [{ name: 'R206', long_name: 'K-Raum 5c' }], original_rooms: [], teachers: [], original_teachers: [] }, extra)),
+  });
+  const cT = mk({ entities: ['calendar.x'], range: 'week', week_days: [todayDow], nav_weeks_ahead: 0 });
+  cT._hass = { callApi: async () => ([
+    lesson('08', { name: 'ETH - Frn', teachers: [{ name: 'Frn', long_name: 'Frn' }], original_teachers: [{ name: 'Sra', long_name: 'Sra' }] }),
+    lesson('09', { name: 'ETH - Ham', teachers: [{ name: 'Ham', long_name: 'Ham' }], original_teachers: [{ name: 'Sra', long_name: 'Sra' }],
+      original_rooms: [{ name: 'R204', long_name: 'K-Raum 5a' }] }),
+    lesson('10', { name: 'ETH - Sra', code: 'cancelled', original_teachers: [{ name: 'Sra', long_name: 'Sra' }] }),
+    lesson('11', { name: 'ETH - Sra', teachers: [{ name: 'Sra', long_name: 'Sra' }] }),
+    lesson('12', { name: 'Sportfest', code: 'irregular', subjects: [], original_teachers: [{ name: 'Sra', long_name: 'Sra' }] }),
+  ]), states: {} };
+  await cT._fetchAndRender();
+  const tItems = cT._buckets.flatMap(b => b.items);
+  eq('5 Stunden geladen', tItems.length, 5);
+  eq('Lehrerwechsel = Vertretung', kat(tItems[0]), 'vertretung');
+  eq('Lehrer- und Raumwechsel = Vertretung', kat(tItems[1]), 'vertretung');
+  eq('Raumwechsel bleibt fürs Popup erhalten', tItems[1].originalRooms[0].name, 'R204');
+  eq('Ausfall schlägt Lehrerwechsel', kat(tItems[2]), 'ausfall');
+  eq('ohne original_teachers = normal', kat(tItems[3]), 'normal');
+  eq('Irregular ohne Fach bleibt Sonderveranstaltung', kat(tItems[4]), 'sonder');
+  eq('Vertretungs-Klasse im HTML', (cT.innerHTML.match(/class="event changed/g) || []).length, 2);
+
+  // Popup: ha-dialog abfangen, um das gerenderte HTML zu lesen.
+  const realCreate = global.document.createElement;
+  const dlg = { addEventListener() {}, querySelector: () => null, style: {} };
+  global.document.createElement = () => dlg;
+  cT._openDetail(tItems[0]);
+  eq('Popup zeigt Lehrerwechsel', /Sra → Frn/.test(dlg.innerHTML), true);
+  eq('Popup-Status Vertretung', /Änderung \/ Vertretung/.test(dlg.innerHTML), true);
+  cT._openDetail(tItems[3]);
+  eq('keine Lehrerzeile ohne Wechsel', /account-switch/.test(dlg.innerHTML), false);
+  global.document.createElement = realCreate;
 
   console.log(fails ? `\n${fails} FEHLER` : '\nAlle Prüfungen bestanden');
   process.exit(fails ? 1 : 0);
